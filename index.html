@@ -36,7 +36,7 @@
 </head>
 <body class="min-h-screen flex flex-col">
 
-  <!-- TELA DE LOGIN (Autentica na tabela usuarios_admin) -->
+  <!-- TELA DE LOGIN -->
   <div id="login-screen" class="fixed inset-0 z-50 bg-bgMain flex items-center justify-center p-4">
     <div class="w-full max-w-md bg-bgCard border border-borderCard rounded-2xl p-8 shadow-2xl">
       <div class="flex items-center gap-3 mb-6">
@@ -69,7 +69,6 @@
 
   <!-- APLICAÇÃO PRINCIPAL -->
   <div id="app-shell" class="hidden flex-1 flex min-h-screen">
-    <!-- SIDEBAR -->
     <aside class="w-64 bg-bgSidebar border-r border-borderCard flex flex-col justify-between shrink-0">
       <div>
         <div class="p-5 flex items-center gap-3 border-b border-borderCard/60">
@@ -110,9 +109,7 @@
       </div>
     </aside>
 
-    <!-- CONTEÚDO PRINCIPAL -->
     <main class="flex-1 flex flex-col min-w-0">
-      <!-- TOPBAR -->
       <header class="h-16 border-b border-borderCard px-6 flex items-center justify-between bg-bgMain/80 backdrop-blur sticky top-0 z-20">
         <h2 id="page-title" class="text-lg font-bold text-white">Dashboard Geral</h2>
         <div class="flex items-center gap-3">
@@ -127,7 +124,6 @@
       </header>
 
       <div class="p-6 space-y-6 flex-1 overflow-y-auto">
-
         <!-- ==================== ABA 1: DASHBOARD ==================== -->
         <section id="tab-dashboard" class="tab-content space-y-6">
           <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
@@ -201,9 +197,8 @@
           </div>
         </section>
 
-        <!-- ==================== ABA 2: LEADS (IMPORTAÇÃO & DISPARO) ==================== -->
+        <!-- ==================== ABA 2: LEADS ==================== -->
         <section id="tab-leads" class="tab-content hidden space-y-5">
-          <!-- Barra de Ações de Planilha e Cadastro -->
           <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
             <div class="flex flex-wrap items-center gap-2.5">
               <button onclick="openImportModal('novo')"
@@ -228,7 +223,6 @@
             </button>
           </div>
 
-          <!-- Filtros de Leads -->
           <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
             <div class="flex flex-wrap items-center gap-3 flex-1">
               <div class="relative flex-1 min-w-[240px] max-w-md">
@@ -249,7 +243,6 @@
             <div class="text-xs text-slate-400" id="leads-count-label">Mostrando 0 registros</div>
           </div>
 
-          <!-- Tabela de Leads -->
           <div class="bg-bgCard border border-borderCard rounded-xl overflow-hidden">
             <div class="overflow-x-auto">
               <table class="w-full text-left border-collapse">
@@ -305,7 +298,6 @@
             </div>
           </div>
 
-          <!-- Visão Lista (Padrão Painel Tottem) -->
           <div id="clientes-view-lista" class="bg-bgCard border border-borderCard rounded-xl overflow-hidden">
             <div class="overflow-x-auto">
               <table class="w-full text-left border-collapse">
@@ -324,7 +316,6 @@
             </div>
           </div>
 
-          <!-- Visão Kanban -->
           <div id="clientes-view-kanban" class="hidden grid grid-cols-1 lg:grid-cols-3 gap-5">
             <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-col gap-3">
               <div class="flex items-center justify-between pb-2 border-b border-borderCard">
@@ -357,23 +348,23 @@
             </div>
           </div>
         </section>
-
       </div>
     </main>
   </div>
 
-  <!-- ==================== MODAL IMPORTAÇÃO VISUAL DE PLANILHAS ==================== -->
-  <div id="modal-import" class="fixed inset-0 z-50 bg-black/75 hidden items-center justify-center p-4">
-    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
+  <!-- ==================== MODAL IMPORTAÇÃO & REVISÃO INTELIGENTE ==================== -->
+  <div id="modal-import" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col shadow-2xl">
       <div class="p-5 border-b border-borderCard flex items-center justify-between">
         <div>
-          <h3 id="import-modal-title" class="text-base font-bold text-white">Importar Planilha de Leads</h3>
-          <p class="text-xs text-slate-400">Selecione o arquivo (.xlsx, .xls ou .csv) e mapeie cada coluna visualmente.</p>
+          <h3 id="import-modal-title" class="text-base font-bold text-white">Importar Planilha</h3>
+          <p id="import-modal-subtitle" class="text-xs text-slate-400">Passo 1: Mapeie as colunas • Passo 2: Revise o cruzamento (com/sem 9º dígito) e ajuste antes de gravar.</p>
         </div>
         <button onclick="closeModal('modal-import')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
       </div>
 
-      <div class="p-5 overflow-y-auto space-y-5 flex-1">
+      <!-- ETAPA 1: UPLOAD E MAPEAMENTO VISUAL -->
+      <div id="import-step-1" class="p-5 overflow-y-auto space-y-5 flex-1">
         <div class="flex flex-wrap items-center gap-4">
           <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" onchange="handleFileSelect(event)"
             class="block text-xs text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-brandBlue file:text-white hover:file:bg-brandBlueHover cursor-pointer" />
@@ -395,12 +386,42 @@
         </div>
       </div>
 
-      <div class="p-4 border-t border-borderCard flex justify-end gap-3">
-        <button onclick="closeModal('modal-import')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
-        <button id="btn-confirm-import" onclick="executeImport()" disabled
-          class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover disabled:opacity-40 text-white">
-          Confirmar Importação
-        </button>
+      <!-- ETAPA 2: TELA DE REVISÃO, CRUZAMENTO E AJUSTES -->
+      <div id="import-step-2" class="hidden p-5 overflow-y-auto space-y-4 flex-1">
+        <!-- Cards Resumo do Cruzamento -->
+        <div id="review-summary-cards" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
+
+        <!-- Abas de Revisão -->
+        <div class="flex items-center justify-between border-b border-borderCard pb-2 flex-wrap gap-2">
+          <div class="flex gap-2" id="review-tabs-bar"></div>
+          <div class="text-[11px] text-slate-400">
+            <i class="fa-solid fa-pen-to-square text-sky-400 mr-1"></i> Você pode editar qualquer campo diretamente na tabela abaixo antes de confirmar.
+          </div>
+        </div>
+
+        <!-- Tabela Editável de Revisão -->
+        <div class="overflow-x-auto border border-borderCard rounded-xl max-h-[48vh]">
+          <table class="w-full text-left text-xs border-collapse" id="review-table"></table>
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-borderCard flex items-center justify-between gap-3">
+        <div>
+          <button id="btn-back-step-1" onclick="backToImportStep1()" class="hidden px-4 py-2 rounded-lg text-xs text-slate-300 bg-bgInput hover:bg-slate-800">
+            <i class="fa-solid fa-arrow-left mr-1"></i> Voltar ao Mapeamento
+          </button>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="closeModal('modal-import')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+          <button id="btn-analyze-import" onclick="analyzeImportRows()" disabled
+            class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover disabled:opacity-40 text-white">
+            Analisar & Revisar Cruzamento <i class="fa-solid fa-arrow-right ml-1"></i>
+          </button>
+          <button id="btn-confirm-import" onclick="commitReviewedImport()"
+            class="hidden px-5 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white">
+            <i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco
+          </button>
+        </div>
       </div>
     </div>
   </div>
