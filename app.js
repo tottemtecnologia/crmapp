@@ -1408,7 +1408,7 @@ function renderImportPreviewTable() {
         { value: 'cnpj', label: 'CNPJ' },
         { value: 'razao_social', label: 'Empresa / Razão Social' },
         { value: 'nome_contato', label: 'Nome do Contato' },
-        { value: 'tag', label: 'TAG da Lista' },
+        { value: 'tag', label: 'TAG (p/ Novos não encontrados)' },
         { value: 'status', label: 'Status (enviado / erro) *' },
         { value: 'motivo_erro', label: 'Motivo do Erro' }
       ];
@@ -1550,7 +1550,6 @@ function analyzeImportRows() {
           matchType: match.matchType,
           oldStatus: match.lead.status,
           newStatus: parsedStatus,
-          tag: rowTag || match.lead.tag || '',
           motivo_erro: parsedStatus === 'erro' ? (motivoErro || 'Erro reportado pelo disparador') : ''
         });
       } else {
@@ -1695,11 +1694,11 @@ function renderReviewScreen() {
 
     cardsEl.innerHTML = `
       <div class="bg-bgInput/80 border border-sky-500/40 rounded-xl p-3">
-        <div class="text-[11px] text-sky-400 font-semibold">ENCONTRADOS NO BANCO (ATUALIZAR)</div>
+        <div class="text-[11px] text-sky-400 font-semibold">ENCONTRADOS NO BANCO (ATUALIZAR STATUS)</div>
         <div class="text-xl font-bold text-white mt-0.5">${activeUpdates} <span class="text-xs font-normal text-slate-400">de ${reviewState.matchedUpdates.length}</span></div>
       </div>
       <div class="bg-bgInput/80 border border-amber-500/40 rounded-xl p-3">
-        <div class="text-[11px] text-amber-400 font-semibold">NÃO ENCONTRADOS (IMPORTAR COMO NOVOS)</div>
+        <div class="text-[11px] text-amber-400 font-semibold">NÃO ENCONTRADOS (NOVOS COM NOVA TAG)</div>
         <div class="text-xl font-bold text-amber-300 mt-0.5">${activeNewImports} <span class="text-xs font-normal text-slate-400">selecionados</span></div>
       </div>
       <div class="bg-bgInput/80 border border-borderCard rounded-xl p-3">
@@ -1710,10 +1709,10 @@ function renderReviewScreen() {
 
     tabsEl.innerHTML = `
       <button onclick="setReviewTab('primary')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold ${reviewState.activeTab === 'primary' ? 'bg-brandBlue text-white' : 'bg-bgInput text-slate-400'}">
-        Encontrados p/ Atualizar (${reviewState.matchedUpdates.length})
+        Encontrados p/ Atualizar Status (${reviewState.matchedUpdates.length})
       </button>
       <button onclick="setReviewTab('secondary')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 ${reviewState.activeTab === 'secondary' ? 'bg-amber-600 text-white' : 'bg-bgInput text-amber-300 border border-amber-500/40'}">
-        <i class="fa-solid fa-triangle-exclamation"></i> Não Encontrados — Ajustar & Importar (${reviewState.unmatchedNew.length})
+        <i class="fa-solid fa-triangle-exclamation"></i> Não Encontrados — Novos c/ TAG (${reviewState.unmatchedNew.length})
       </button>
     `;
 
@@ -1846,21 +1845,21 @@ async function commitReviewedImport() {
     }
     alert(`${selected.length} novos leads importados com sucesso!`);
   } else {
+    // Atualiza APENAS o status (e motivo_erro) dos leads existentes, preservando a TAG original deles
     const toUpdate = reviewState.matchedUpdates.filter(r => r.include);
     const updateChunks = chunkArray(toUpdate, 25);
     for (const batch of updateChunks) {
       await Promise.all(
-        batch.map(item => {
-          const updatePayload = {
+        batch.map(item =>
+          sb.from('crm_leads').update({
             status: item.newStatus,
             motivo_erro: item.newStatus === 'erro' ? (item.motivo_erro || 'Erro no envio') : null
-          };
-          if (item.tag) updatePayload.tag = item.tag;
-          return sb.from('crm_leads').update(updatePayload).eq('id', item.lead_id);
-        })
+          }).eq('id', item.lead_id)
+        )
       );
     }
 
+    // Aplica a nova TAG somente nos contatos novos (não encontrados)
     const toInsertNew = reviewState.unmatchedNew
       .filter(r => r.include && r.telefone)
       .map(r => ({
@@ -1884,7 +1883,7 @@ async function commitReviewedImport() {
       }
     }
 
-    alert(`Sincronização concluída!\n• ${toUpdate.length} leads existentes atualizados.\n• ${toInsertNew.length} contatos não encontrados importados com o status da planilha.`);
+    alert(`Sincronização concluída!\n• ${toUpdate.length} leads existentes tiveram apenas o status atualizado.\n• ${toInsertNew.length} contatos novos importados com a nova TAG.`);
   }
 
   btn.disabled = false;
