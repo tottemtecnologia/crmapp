@@ -11,18 +11,29 @@ let leadsData = [];
 let pessoasData = [];
 let currentUser = null;
 let clientesViewMode = 'lista';
-let importMode = 'novo'; // 'novo' | 'retorno'
+let importMode = 'novo';
 let parsedSheetRows = [];
 let parsedSheetHeaders = [];
 let activeTimelineTarget = { lead_id: null, pessoa_id: null };
 
-// Estado da revisão pré-importação
 let reviewState = {
-  activeTab: 'primary', // 'primary' | 'secondary'
-  toInsert: [],         // Novos leads prontos para inserir (modo novo)
-  duplicates: [],       // Duplicados ignorados (modo novo)
-  matchedUpdates: [],   // Leads encontrados para atualizar status (modo retorno)
-  unmatchedNew: []      // Contatos NÃO encontrados no retorno (para ajustar e importar)
+  activeTab: 'primary',
+  toInsert: [],
+  duplicates: [],
+  matchedUpdates: [],
+  unmatchedNew: []
+};
+
+// Estado do trabalhador em background para enriquecimento de CNPJ (Load Balance)
+let bgEnrichWorker = {
+  running: false,
+  paused: false,
+  cancelled: false,
+  queue: [],
+  processed: 0,
+  success: 0,
+  failed: 0,
+  providerIndex: 0
 };
 
 // ============================================================================
@@ -134,7 +145,7 @@ function switchTab(tabName) {
 }
 
 // ============================================================================
-// UTILITÁRIOS E CRUZAMENTO INTELIGENTE (COM E SEM 9º DÍGITO)
+// UTILITÁRIOS DE TELEFONE (9º DÍGITO) E FORMATAÇÃO
 // ============================================================================
 function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
@@ -154,47 +165,57 @@ function normalizePhone(phone) {
 }
 
 /**
- * Gera todas as variações possíveis de um telefone brasileiro (com e sem o 9º dígito)
- * Ex: '5562999998888' -> ['5562999998888', '556299998888']
- * Ex: '556299998888'  -> ['556299998888', '5562999998888']
+ * Formata o telefone conforme a regra do 9º dígito escolhida na exportação:
+ * - 'keep': mantém original
+ * - 'add9': garante 55 + DDD + 9 + 8 dígitos (para celulares)
+ * - 'remove9': remove o 9 após o DDD (55 + DDD + 8 dígitos)
  */
+function formatPhoneNinthDigit(rawPhone, mode = 'keep') {
+  const norm = normalizePhone(rawPhone);
+  if (!norm || mode === 'keep' || !norm.startsWith('55')) return norm;
+
+  const local = norm.slice(2); // DDD + número
+  if (mode === 'add9') {
+    if (local.length === 10 && ['6', '7', '8', '9'].includes(local[2])) {
+      return '55' + local.slice(0, 2) + '9' + local.slice(2);
+    }
+    return norm;
+  }
+
+  if (mode === 'remove9') {
+    if (local.length === 11 && local[2] === '9') {
+      return '55' + local.slice(0, 2) + local.slice(3);
+    }
+    return norm;
+  }
+
+  return norm;
+}
+
 function getPhoneMatchKeys(rawPhone) {
   const norm = normalizePhone(rawPhone);
   if (!norm) return [];
   const keys = new Set([norm]);
 
   if (norm.startsWith('55')) {
-    const local = norm.slice(2); // DDD + número
+    const local = norm.slice(2);
     if (local.length === 11 && local[2] === '9') {
-      // Tem 9º dígito -> gera versão sem o 9
-      const sem9 = '55' + local.slice(0, 2) + local.slice(3);
-      keys.add(sem9);
-    } else if (local.length === 10) {
-      // Não tem 9º dígito -> gera versão com o 9 (se for celular: dígitos 6,7,8,9)
-      if (['6', '7', '8', '9'].includes(local[2])) {
-        const com9 = '55' + local.slice(0, 2) + '9' + local.slice(2);
-        keys.add(com9);
-      }
+      keys.add('55' + local.slice(0, 2) + local.slice(3));
+    } else if (local.length === 10 && ['6', '7', '8', '9'].includes(local[2])) {
+      keys.add('55' + local.slice(0, 2) + '9' + local.slice(2));
     }
   }
   return Array.from(keys);
 }
 
-/**
- * Constrói índices de busca rápida dos leads atuais considerando:
- * - Telefone exato, telefone com 9 e telefone sem 9
- * - CNPJ (14 dígitos)
- */
 function buildLeadsLookupIndex() {
   const byPhoneKey = new Map();
   const byCnpj = new Map();
 
   leadsData.forEach(lead => {
-    const keys = getPhoneMatchKeys(lead.telefone);
-    keys.forEach(k => {
+    getPhoneMatchKeys(lead.telefone).forEach(k => {
       if (!byPhoneKey.has(k)) byPhoneKey.set(k, lead);
     });
-
     const cnpjDigits = onlyDigits(lead.cnpj);
     if (cnpjDigits.length === 14 && !byCnpj.has(cnpjDigits)) {
       byCnpj.set(cnpjDigits, lead);
@@ -219,12 +240,8 @@ function findMatchingLead(rawPhone, rawCnpj, lookupIndex) {
 
   const cnpjDigits = onlyDigits(rawCnpj);
   if (cnpjDigits.length === 14 && lookupIndex.byCnpj.has(cnpjDigits)) {
-    return {
-      lead: lookupIndex.byCnpj.get(cnpjDigits),
-      matchType: 'CNPJ'
-    };
+    return { lead: lookupIndex.byCnpj.get(cnpjDigits), matchType: 'CNPJ' };
   }
-
   return null;
 }
 
@@ -250,43 +267,25 @@ function normalizeStatusVenda(raw) {
 
 function parseDisparoStatus(rawStatus) {
   const s = String(rawStatus || '').toLowerCase().trim();
-  if (
-    s.includes('enviado') ||
-    s === 'ok' ||
-    s === 'sucesso' ||
-    s === 'sent' ||
-    s === 'entregue' ||
-    s === 'concluido' ||
-    s === 'concluído'
-  ) {
+  if (s.includes('enviado') || s === 'ok' || s === 'sucesso' || s === 'sent' || s === 'entregue' || s === 'concluido' || s === 'concluído') {
     return 'enviado';
   }
-  if (
-    s.includes('erro') ||
-    s.includes('falha') ||
-    s.includes('invalido') ||
-    s.includes('inválido') ||
-    s === 'error' ||
-    s === 'failed'
-  ) {
+  if (s.includes('erro') || s.includes('falha') || s.includes('invalido') || s.includes('inválido') || s === 'error' || s === 'failed') {
     return 'erro';
   }
   return 'nao_enviado';
 }
 
 // ============================================================================
-// CONSULTA CNPJ (BRASILAPI + FALLBACK RECEITAWS + EXTRAÇÃO QSA)
+// LOAD BALANCE DE APIS DE CNPJ (BRASILAPI + RECEITAWS + MINHARECEITA)
 // ============================================================================
-async function fetchCNPJData(rawCnpj) {
-  const cnpj = onlyDigits(rawCnpj);
-  if (cnpj.length !== 14) {
-    alert('Informe um CNPJ válido com 14 dígitos.');
-    return null;
-  }
-
-  try {
-    const res = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
-    if (res.ok) {
+const CNPJ_PROVIDERS = [
+  {
+    name: 'BrasilAPI',
+    fetchFn: async (cnpj) => {
+      const res = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
+      if (res.status === 429) throw new Error('RATE_LIMIT');
+      if (!res.ok) return null;
       const d = await res.json();
       const socioQSA = Array.isArray(d.qsa) && d.qsa.length > 0 ? d.qsa[0].nome_socio : '';
       return {
@@ -301,67 +300,287 @@ async function fetchCNPJData(rawCnpj) {
         numero: d.numero || '',
         bairro: d.bairro || '',
         cidade: d.municipio || '',
-        estado: d.uf || ''
+        estado: d.uf || '',
+        fonte: 'BrasilAPI'
       };
     }
-  } catch (e) {
-    console.warn('BrasilAPI falhou, tentando ReceitaWS...', e);
-  }
-
-  try {
-    const resRW = await fetch(`https://www.receitaws.com.br/v1/cnpj/${cnpj}`);
-    if (resRW.ok) {
-      const d = await resRW.json();
-      if (d.status !== 'ERROR') {
-        const socioQSA = Array.isArray(d.qsa) && d.qsa.length > 0 ? d.qsa[0].nome : '';
-        return {
-          cnpj: formatCNPJ(cnpj),
-          razao_social: d.nome || '',
-          nome_fantasia: d.fantasia || socioQSA || '',
-          socio_qsa: socioQSA,
-          email: (d.email || '').toLowerCase(),
-          telefone: normalizePhone((d.telefone || '').split('/')[0]),
-          cep: onlyDigits(d.cep || ''),
-          logradouro: d.logradouro || '',
-          numero: d.numero || '',
-          bairro: d.bairro || '',
-          cidade: d.municipio || '',
-          estado: d.uf || ''
-        };
-      }
+  },
+  {
+    name: 'MinhaReceita',
+    fetchFn: async (cnpj) => {
+      const res = await fetch(`https://minhareceita.org/${cnpj}`);
+      if (res.status === 429) throw new Error('RATE_LIMIT');
+      if (!res.ok) return null;
+      const d = await res.json();
+      const socioQSA = Array.isArray(d.qsa) && d.qsa.length > 0 ? d.qsa[0].nome_socio : '';
+      return {
+        cnpj: formatCNPJ(cnpj),
+        razao_social: d.razao_social || '',
+        nome_fantasia: d.nome_fantasia || socioQSA || '',
+        socio_qsa: socioQSA,
+        email: (d.email || '').toLowerCase(),
+        telefone: normalizePhone(d.ddd_telefone_1 || ''),
+        cep: onlyDigits(d.cep || ''),
+        logradouro: d.logradouro || '',
+        numero: d.numero || '',
+        bairro: d.bairro || '',
+        cidade: d.municipio || '',
+        estado: d.uf || '',
+        fonte: 'MinhaReceita'
+      };
     }
-  } catch (e) {
-    console.error('ReceitaWS também falhou:', e);
+  },
+  {
+    name: 'ReceitaWS',
+    fetchFn: async (cnpj) => {
+      const res = await fetch(`https://www.receitaws.com.br/v1/cnpj/${cnpj}`);
+      if (res.status === 429) throw new Error('RATE_LIMIT');
+      if (!res.ok) return null;
+      const d = await res.json();
+      if (d.status === 'ERROR') return null;
+      const socioQSA = Array.isArray(d.qsa) && d.qsa.length > 0 ? d.qsa[0].nome : '';
+      return {
+        cnpj: formatCNPJ(cnpj),
+        razao_social: d.nome || '',
+        nome_fantasia: d.fantasia || socioQSA || '',
+        socio_qsa: socioQSA,
+        email: (d.email || '').toLowerCase(),
+        telefone: normalizePhone((d.telefone || '').split('/')[0]),
+        cep: onlyDigits(d.cep || ''),
+        logradouro: d.logradouro || '',
+        numero: d.numero || '',
+        bairro: d.bairro || '',
+        cidade: d.municipio || '',
+        estado: d.uf || '',
+        fonte: 'ReceitaWS'
+      };
+    }
   }
+];
 
-  alert('Não foi possível consultar este CNPJ na BrasilAPI nem na ReceitaWS no momento.');
+/**
+ * Consulta CNPJ fazendo rotação (Load Balance) entre os 3 provedores
+ * e failover automático caso algum dê 429 ou erro.
+ */
+async function fetchCNPJLoadBalanced(rawCnpj, preferredStartIdx = null) {
+  const cnpj = onlyDigits(rawCnpj);
+  if (cnpj.length !== 14) return null;
+
+  const startIdx = preferredStartIdx !== null ? preferredStartIdx % CNPJ_PROVIDERS.length : 0;
+
+  for (let attempt = 0; attempt < CNPJ_PROVIDERS.length; attempt++) {
+    const idx = (startIdx + attempt) % CNPJ_PROVIDERS.length;
+    const provider = CNPJ_PROVIDERS[idx];
+    try {
+      const result = await provider.fetchFn(cnpj);
+      if (result && result.razao_social) {
+        return result;
+      }
+    } catch (err) {
+      // Se deu 429 ou erro de rede, pula imediatamente para o próximo provedor da fila
+      console.warn(`[LoadBalance] ${provider.name} indisponível ou 429, alternando...`);
+    }
+  }
   return null;
 }
 
-async function consultarCNPJParaLead() {
+// Busca individual apenas da Razão Social dentro do Modal de Lead
+async function consultarRazaoSocialNoModalLead() {
   const cnpj = document.getElementById('lead-cnpj').value;
-  const info = await fetchCNPJData(cnpj);
-  if (!info) return;
+  if (onlyDigits(cnpj).length !== 14) {
+    return alert('Informe um CNPJ válido com 14 dígitos.');
+  }
+
+  const btn = document.getElementById('btn-modal-lead-cnpj');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+
+  const info = await fetchCNPJLoadBalanced(cnpj, bgEnrichWorker.providerIndex++);
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> Razão';
+
+  if (!info || !info.razao_social) {
+    return alert('Não foi possível obter a Razão Social deste CNPJ no momento.');
+  }
 
   document.getElementById('lead-cnpj').value = info.cnpj;
-  if (info.razao_social) document.getElementById('lead-razao').value = info.razao_social;
-  if (info.socio_qsa) document.getElementById('lead-contato').value = info.socio_qsa;
-  if (info.email && !document.getElementById('lead-email').value) document.getElementById('lead-email').value = info.email;
-  if (info.telefone && !document.getElementById('lead-telefone').value) document.getElementById('lead-telefone').value = info.telefone;
+  document.getElementById('lead-razao').value = info.razao_social;
 }
 
+// Busca individual rápida direto da linha da tabela de Leads (1 clique -> salva no banco)
+async function quickEnrichLeadRazao(leadId) {
+  const lead = leadsData.find(l => l.id === leadId);
+  if (!lead || onlyDigits(lead.cnpj).length !== 14) return;
+
+  const btnEl = document.getElementById(`btn-enrich-row-${leadId}`);
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+  }
+
+  const info = await fetchCNPJLoadBalanced(lead.cnpj, bgEnrichWorker.providerIndex++);
+
+  if (info && info.razao_social) {
+    await sb.from('crm_leads').update({ razao_social: info.razao_social }).eq('id', leadId);
+    lead.razao_social = info.razao_social;
+    renderLeadsTable();
+  } else {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.innerHTML = '<i class="fa-solid fa-bolt"></i>';
+    }
+    alert('Não foi possível consultar a Razão Social deste CNPJ agora.');
+  }
+}
+
+// ============================================================================
+// ENRIQUECIMENTO EM MASSA EM BACKGROUND (COM LOAD BALANCE ANTI-429)
+// ============================================================================
+function openBulkEnrichModal() {
+  updateBulkEnrichCount();
+  openModal('modal-bulk-enrich');
+}
+
+function getFilteredLeadsForBulkEnrich() {
+  const mode = document.getElementById('bulk-enrich-filter').value;
+  return leadsData.filter(l => {
+    const hasValidCnpj = onlyDigits(l.cnpj).length === 14;
+    if (!hasValidCnpj) return false;
+
+    const hasRazao = Boolean((l.razao_social || '').trim());
+    if (mode === 'forcar_todos') return true;
+    if (hasRazao) return false;
+
+    if (mode === 'sem_razao_todos') return true;
+    return l.status === mode;
+  });
+}
+
+function updateBulkEnrichCount() {
+  const list = getFilteredLeadsForBulkEnrich();
+  document.getElementById('bulk-enrich-queue-count').textContent = `${list.length} leads`;
+  document.getElementById('btn-start-bulk-enrich').disabled = list.length === 0;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function startBackgroundEnrichment() {
+  if (bgEnrichWorker.running) {
+    return alert('Já existe um processamento em background em andamento.');
+  }
+
+  const targets = getFilteredLeadsForBulkEnrich();
+  if (!targets.length) return;
+
+  bgEnrichWorker = {
+    running: true,
+    paused: false,
+    cancelled: false,
+    queue: targets,
+    processed: 0,
+    success: 0,
+    failed: 0,
+    providerIndex: 0
+  };
+
+  closeModal('modal-bulk-enrich');
+  const bar = document.getElementById('bg-enrichment-bar');
+  bar.classList.remove('hidden');
+  updateBgEnrichmentUI('Iniciando consultas...');
+
+  for (let i = 0; i < bgEnrichWorker.queue.length; i++) {
+    if (bgEnrichWorker.cancelled) break;
+
+    while (bgEnrichWorker.paused && !bgEnrichWorker.cancelled) {
+      updateBgEnrichmentUI('Pausado pelo usuário');
+      await sleep(500);
+    }
+    if (bgEnrichWorker.cancelled) break;
+
+    const lead = bgEnrichWorker.queue[i];
+    const providerIdx = bgEnrichWorker.providerIndex % CNPJ_PROVIDERS.length;
+    const providerName = CNPJ_PROVIDERS[providerIdx].name;
+    bgEnrichWorker.providerIndex++;
+
+    updateBgEnrichmentUI(`Consultando ${lead.cnpj} via ${providerName}...`);
+
+    const info = await fetchCNPJLoadBalanced(lead.cnpj, providerIdx);
+    bgEnrichWorker.processed++;
+
+    if (info && info.razao_social) {
+      await sb.from('crm_leads').update({ razao_social: info.razao_social }).eq('id', lead.id);
+      lead.razao_social = info.razao_social;
+      bgEnrichWorker.success++;
+      // Atualiza a tabela suavemente a cada 3 registros para não travar a digitação do usuário
+      if (bgEnrichWorker.success % 3 === 0) renderLeadsTable();
+    } else {
+      bgEnrichWorker.failed++;
+    }
+
+    updateBgEnrichmentUI(`Último: ${info?.fonte || providerName}`);
+
+    // Cadência inteligente: como intercala entre 3 APIs diferentes, 850ms entre chamadas
+    // mantém cada API abaixo de ~23 req/min (evitando 429 mesmo na ReceitaWS)
+    if (i < bgEnrichWorker.queue.length - 1 && !bgEnrichWorker.cancelled) {
+      await sleep(850);
+    }
+  }
+
+  bgEnrichWorker.running = false;
+  renderLeadsTable();
+
+  document.getElementById('bg-enrich-title').textContent = bgEnrichWorker.cancelled
+    ? 'Processamento interrompido.'
+    : 'Enriquecimento de Razão Social concluído!';
+  document.getElementById('bg-enrich-icon').className = 'fa-solid fa-circle-check text-emerald-400';
+
+  setTimeout(() => {
+    if (!bgEnrichWorker.running) {
+      bar.classList.add('hidden');
+      document.getElementById('bg-enrich-icon').className = 'fa-solid fa-server fa-beat-fade';
+    }
+  }, 6000);
+}
+
+function updateBgEnrichmentUI(apiStatusText) {
+  const total = bgEnrichWorker.queue.length;
+  const pct = total > 0 ? Math.round((bgEnrichWorker.processed / total) * 100) : 0;
+
+  document.getElementById('bg-enrich-counter').textContent = `${bgEnrichWorker.processed} / ${total}`;
+  document.getElementById('bg-enrich-progress').style.width = `${pct}%`;
+  document.getElementById('bg-enrich-api-badge').textContent = apiStatusText;
+  document.getElementById('bg-enrich-stats').textContent = `Sucesso: ${bgEnrichWorker.success} • Falhas: ${bgEnrichWorker.failed}`;
+}
+
+function toggleBackgroundEnrichmentPause() {
+  bgEnrichWorker.paused = !bgEnrichWorker.paused;
+  const btn = document.getElementById('btn-bg-pause');
+  btn.innerHTML = bgEnrichWorker.paused
+    ? '<i class="fa-solid fa-play mr-1"></i> Retomar'
+    : '<i class="fa-solid fa-pause mr-1"></i> Pausar';
+}
+
+function stopBackgroundEnrichment() {
+  bgEnrichWorker.cancelled = true;
+  bgEnrichWorker.paused = false;
+}
+
+// Consulta completa para o Modal de Cliente (Tabela Pessoas)
 async function consultarCNPJParaCliente() {
   const btn = document.getElementById('btn-busca-cnpj-cli');
   btn.disabled = true;
   btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Buscando...';
 
   const cnpj = document.getElementById('cli-cnpj').value;
-  const info = await fetchCNPJData(cnpj);
+  const info = await fetchCNPJLoadBalanced(cnpj, 0);
 
   btn.disabled = false;
   btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Consultar CNPJ';
 
-  if (!info) return;
+  if (!info) return alert('Não foi possível consultar este CNPJ no momento.');
 
   document.getElementById('cli-cnpj').value = info.cnpj;
   document.getElementById('cli-razao').value = info.razao_social;
@@ -374,6 +593,61 @@ async function consultarCNPJParaCliente() {
   document.getElementById('cli-bairro').value = info.bairro;
   document.getElementById('cli-cidade').value = info.cidade;
   document.getElementById('cli-estado').value = info.estado;
+}
+
+// ============================================================================
+// EXPORTAÇÃO PROFISSIONAL DE LEADS (STATUS + 9º DÍGITO + CUPOM)
+// ============================================================================
+function openExportModal() {
+  document.getElementById('exp-cupom-filter').value = '';
+  updateExportPreviewCount();
+  openModal('modal-export');
+}
+
+function getLeadsToExport() {
+  const checkedStatuses = Array.from(document.querySelectorAll('.exp-status-cb:checked')).map(cb => cb.value);
+  const cupomFilter = document.getElementById('exp-cupom-filter').value.trim().toUpperCase();
+
+  return leadsData.filter(l => {
+    if (!checkedStatuses.includes(l.status)) return false;
+    if (cupomFilter && (l.cupom || '').toUpperCase() !== cupomFilter) return false;
+    return true;
+  });
+}
+
+function updateExportPreviewCount() {
+  const list = getLeadsToExport();
+  document.getElementById('exp-total-preview').textContent = `${list.length} contato(s)`;
+  document.getElementById('btn-run-export').disabled = list.length === 0;
+}
+
+function executeProfessionalExport() {
+  const list = getLeadsToExport();
+  if (!list.length) return;
+
+  const ninthDigitMode = document.querySelector('input[name="exp-ninth-digit"]:checked')?.value || 'keep';
+  const fileFormat = document.getElementById('exp-file-format').value;
+
+  const rows = list.map(l => ({
+    Telefone: formatPhoneNinthDigit(l.telefone, ninthDigitMode),
+    Razao_Social: l.razao_social || '',
+    Nome_Contato: l.nome_contato || l.razao_social || '',
+    CNPJ: l.cnpj || '',
+    Cupom: l.cupom || '',
+    Status_Atual: l.status,
+    Status_Retorno: ''
+  }));
+
+  const ws = XLSX.utils.json_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Leads_Disparo');
+
+  const dateTag = new Date().toISOString().slice(0, 10);
+  const suffix9 = ninthDigitMode === 'add9' ? '_com9' : ninthDigitMode === 'remove9' ? '_sem9' : '';
+  const fileName = `leads_disparo${suffix9}_${dateTag}.${fileFormat}`;
+
+  XLSX.writeFile(wb, fileName, { bookType: fileFormat });
+  closeModal('modal-export');
 }
 
 // ============================================================================
@@ -463,6 +737,7 @@ function renderLeadsTable() {
     if (!matchText) return false;
     if (statusFilter === 'todos') return true;
     if (statusFilter === 'convertido') return Boolean(l.pessoa_id);
+    if (statusFilter === 'sem_razao') return onlyDigits(l.cnpj).length === 14 && !(l.razao_social || '').trim();
     return l.status === statusFilter;
   });
 
@@ -482,14 +757,25 @@ function renderLeadsTable() {
     };
 
     const waUrl = `https://wa.me/${onlyDigits(l.telefone)}`;
+    const hasValidCnpj = onlyDigits(l.cnpj).length === 14;
 
     return `
       <tr class="hover:bg-bgInput/40 transition">
         <td class="py-3.5 px-4">
-          <div class="font-semibold text-white text-xs">${l.razao_social || l.nome_contato || 'Sem Nome'}</div>
+          <div class="font-semibold text-white text-xs">${l.razao_social || l.nome_contato || '<span class="text-slate-500 italic">Sem Razão Social</span>'}</div>
           ${l.nome_contato && l.razao_social ? `<div class="text-[11px] text-slate-400">Contato: ${l.nome_contato}</div>` : ''}
         </td>
-        <td class="py-3.5 px-4 text-xs text-slate-300 font-mono">${l.cnpj || '-'}</td>
+        <td class="py-3.5 px-4 text-xs text-slate-300 font-mono">
+          <div class="flex items-center gap-1.5">
+            <span>${l.cnpj || '-'}</span>
+            ${hasValidCnpj ? `
+              <button id="btn-enrich-row-${l.id}" onclick="quickEnrichLeadRazao('${l.id}')" title="Buscar Razão Social deste CNPJ"
+                class="px-1.5 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/30 border border-amber-500/30 text-amber-300 text-[10px] transition">
+                <i class="fa-solid fa-bolt"></i>
+              </button>
+            ` : ''}
+          </div>
+        </td>
         <td class="py-3.5 px-4">
           <div class="text-xs text-slate-200 flex items-center gap-2">
             ${l.telefone}
@@ -992,10 +1278,6 @@ function renderImportPreviewTable() {
   document.getElementById('btn-analyze-import').disabled = false;
 }
 
-/**
- * Etapa 2: Executa o cruzamento inteligente (com e sem 9º dígito + CNPJ)
- * e prepara os arrays editáveis antes de gravar no Supabase.
- */
 function analyzeImportRows() {
   const mappers = Array.from(document.querySelectorAll('.col-mapper'));
   const colMap = {};
@@ -1064,7 +1346,6 @@ function analyzeImportRows() {
         });
       }
     } else {
-      // Modo Retorno do Disparador
       const parsedStatus = parseDisparoStatus(row[colMap.status]);
       const motivoErro = colMap.motivo_erro ? String(row[colMap.motivo_erro] || '').trim() : '';
 
@@ -1081,7 +1362,6 @@ function analyzeImportRows() {
           motivo_erro: parsedStatus === 'erro' ? (motivoErro || 'Erro reportado pelo disparador') : ''
         });
       } else {
-        // Não encontrado no banco -> vai para janela de ajuste e importação opcional
         reviewState.unmatchedNew.push({
           include: true,
           telefone: normPhone,
@@ -1096,7 +1376,6 @@ function analyzeImportRows() {
     }
   });
 
-  // Se no retorno houver não encontrados e nenhum encontrado, já abre direto na aba de Não Encontrados
   if (importMode === 'retorno' && reviewState.matchedUpdates.length === 0 && reviewState.unmatchedNew.length > 0) {
     reviewState.activeTab = 'secondary';
   }
@@ -1211,7 +1490,6 @@ function renderReviewScreen() {
       `;
     }
   } else {
-    // MODO SINCRONIZAR RETORNO
     const activeUpdates = reviewState.matchedUpdates.filter(r => r.include).length;
     const activeNewImports = reviewState.unmatchedNew.filter(r => r.include).length;
 
@@ -1285,7 +1563,6 @@ function renderReviewScreen() {
         </tbody>
       `;
     } else {
-      // Aba de NÃO ENCONTRADOS no retorno -> Editáveis para importar com o status da planilha
       tableEl.innerHTML = `
         <thead class="bg-bgSidebar border-b border-borderCard text-[11px] text-slate-400 uppercase">
           <tr>
@@ -1365,7 +1642,6 @@ async function commitReviewedImport() {
     }
     alert(`${selected.length} novos leads importados com sucesso!`);
   } else {
-    // 1. Atualiza os encontrados
     const toUpdate = reviewState.matchedUpdates.filter(r => r.include);
     for (const item of toUpdate) {
       await sb.from('crm_leads').update({
@@ -1374,7 +1650,6 @@ async function commitReviewedImport() {
       }).eq('id', item.lead_id);
     }
 
-    // 2. Insere os não encontrados que foram aprovados/ajustados na revisão
     const toInsertNew = reviewState.unmatchedNew
       .filter(r => r.include && r.telefone)
       .map(r => ({
@@ -1401,26 +1676,6 @@ async function commitReviewedImport() {
   btn.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco';
   closeModal('modal-import');
   await refreshAll();
-}
-
-function exportLeadsForSender() {
-  const pendentes = leadsData.filter(l => l.status === 'nao_enviado');
-  if (pendentes.length === 0) {
-    return alert('Não há leads com status "nao_enviado" para exportar.');
-  }
-
-  const rows = pendentes.map(l => ({
-    Telefone: l.telefone,
-    Nome: l.nome_contato || l.razao_social || '',
-    Empresa: l.razao_social || '',
-    CNPJ: l.cnpj || '',
-    Status: ''
-  }));
-
-  const ws = XLSX.utils.json_to_sheet(rows);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Disparo_WhatsApp');
-  XLSX.writeFile(wb, `leads_para_disparo_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }
 
 // ============================================================================
