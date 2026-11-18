@@ -16,8 +16,17 @@ let parsedSheetRows = [];
 let parsedSheetHeaders = [];
 let activeTimelineTarget = { lead_id: null, pessoa_id: null };
 
+// Estado da revisão pré-importação
+let reviewState = {
+  activeTab: 'primary', // 'primary' | 'secondary'
+  toInsert: [],         // Novos leads prontos para inserir (modo novo)
+  duplicates: [],       // Duplicados ignorados (modo novo)
+  matchedUpdates: [],   // Leads encontrados para atualizar status (modo retorno)
+  unmatchedNew: []      // Contatos NÃO encontrados no retorno (para ajustar e importar)
+};
+
 // ============================================================================
-// INICIALIZAÇÃO E AUTENTICAÇÃO (Usa sua tabela usuarios_admin)
+// INICIALIZAÇÃO E AUTENTICAÇÃO
 // ============================================================================
 document.addEventListener('DOMContentLoaded', () => {
   const saved = localStorage.getItem('tottem_crm_user');
@@ -125,7 +134,7 @@ function switchTab(tabName) {
 }
 
 // ============================================================================
-// UTILITÁRIOS DE FORMATAÇÃO E LIMPEZA
+// UTILITÁRIOS E CRUZAMENTO INTELIGENTE (COM E SEM 9º DÍGITO)
 // ============================================================================
 function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
@@ -133,7 +142,7 @@ function onlyDigits(str) {
 
 function formatCNPJ(cnpj) {
   const d = onlyDigits(cnpj);
-  if (d.length !== 14) return cnpj || '-';
+  if (d.length !== 14) return cnpj || '';
   return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
 }
 
@@ -142,6 +151,81 @@ function normalizePhone(phone) {
   if (!d) return '';
   if (d.length === 10 || d.length === 11) d = '55' + d;
   return d;
+}
+
+/**
+ * Gera todas as variações possíveis de um telefone brasileiro (com e sem o 9º dígito)
+ * Ex: '5562999998888' -> ['5562999998888', '556299998888']
+ * Ex: '556299998888'  -> ['556299998888', '5562999998888']
+ */
+function getPhoneMatchKeys(rawPhone) {
+  const norm = normalizePhone(rawPhone);
+  if (!norm) return [];
+  const keys = new Set([norm]);
+
+  if (norm.startsWith('55')) {
+    const local = norm.slice(2); // DDD + número
+    if (local.length === 11 && local[2] === '9') {
+      // Tem 9º dígito -> gera versão sem o 9
+      const sem9 = '55' + local.slice(0, 2) + local.slice(3);
+      keys.add(sem9);
+    } else if (local.length === 10) {
+      // Não tem 9º dígito -> gera versão com o 9 (se for celular: dígitos 6,7,8,9)
+      if (['6', '7', '8', '9'].includes(local[2])) {
+        const com9 = '55' + local.slice(0, 2) + '9' + local.slice(2);
+        keys.add(com9);
+      }
+    }
+  }
+  return Array.from(keys);
+}
+
+/**
+ * Constrói índices de busca rápida dos leads atuais considerando:
+ * - Telefone exato, telefone com 9 e telefone sem 9
+ * - CNPJ (14 dígitos)
+ */
+function buildLeadsLookupIndex() {
+  const byPhoneKey = new Map();
+  const byCnpj = new Map();
+
+  leadsData.forEach(lead => {
+    const keys = getPhoneMatchKeys(lead.telefone);
+    keys.forEach(k => {
+      if (!byPhoneKey.has(k)) byPhoneKey.set(k, lead);
+    });
+
+    const cnpjDigits = onlyDigits(lead.cnpj);
+    if (cnpjDigits.length === 14 && !byCnpj.has(cnpjDigits)) {
+      byCnpj.set(cnpjDigits, lead);
+    }
+  });
+
+  return { byPhoneKey, byCnpj };
+}
+
+function findMatchingLead(rawPhone, rawCnpj, lookupIndex) {
+  const keys = getPhoneMatchKeys(rawPhone);
+  for (const k of keys) {
+    if (lookupIndex.byPhoneKey.has(k)) {
+      const lead = lookupIndex.byPhoneKey.get(k);
+      const exactNorm = normalizePhone(rawPhone) === normalizePhone(lead.telefone);
+      return {
+        lead,
+        matchType: exactNorm ? 'Telefone Exato' : 'Telefone (Ajuste 9º dígito)'
+      };
+    }
+  }
+
+  const cnpjDigits = onlyDigits(rawCnpj);
+  if (cnpjDigits.length === 14 && lookupIndex.byCnpj.has(cnpjDigits)) {
+    return {
+      lead: lookupIndex.byCnpj.get(cnpjDigits),
+      matchType: 'CNPJ'
+    };
+  }
+
+  return null;
 }
 
 function formatDateBR(iso) {
@@ -164,6 +248,32 @@ function normalizeStatusVenda(raw) {
   return 'testando';
 }
 
+function parseDisparoStatus(rawStatus) {
+  const s = String(rawStatus || '').toLowerCase().trim();
+  if (
+    s.includes('enviado') ||
+    s === 'ok' ||
+    s === 'sucesso' ||
+    s === 'sent' ||
+    s === 'entregue' ||
+    s === 'concluido' ||
+    s === 'concluído'
+  ) {
+    return 'enviado';
+  }
+  if (
+    s.includes('erro') ||
+    s.includes('falha') ||
+    s.includes('invalido') ||
+    s.includes('inválido') ||
+    s === 'error' ||
+    s === 'failed'
+  ) {
+    return 'erro';
+  }
+  return 'nao_enviado';
+}
+
 // ============================================================================
 // CONSULTA CNPJ (BRASILAPI + FALLBACK RECEITAWS + EXTRAÇÃO QSA)
 // ============================================================================
@@ -174,7 +284,6 @@ async function fetchCNPJData(rawCnpj) {
     return null;
   }
 
-  // 1. Tenta BrasilAPI primeiro
   try {
     const res = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cnpj}`);
     if (res.ok) {
@@ -192,15 +301,13 @@ async function fetchCNPJData(rawCnpj) {
         numero: d.numero || '',
         bairro: d.bairro || '',
         cidade: d.municipio || '',
-        estado: d.uf || '',
-        fonte: 'BrasilAPI'
+        estado: d.uf || ''
       };
     }
   } catch (e) {
     console.warn('BrasilAPI falhou, tentando ReceitaWS...', e);
   }
 
-  // 2. Fallback automático para ReceitaWS
   try {
     const resRW = await fetch(`https://www.receitaws.com.br/v1/cnpj/${cnpj}`);
     if (resRW.ok) {
@@ -219,8 +326,7 @@ async function fetchCNPJData(rawCnpj) {
           numero: d.numero || '',
           bairro: d.bairro || '',
           cidade: d.municipio || '',
-          estado: d.uf || '',
-          fonte: 'ReceitaWS'
+          estado: d.uf || ''
         };
       }
     }
@@ -297,7 +403,6 @@ function renderDashboard() {
   document.getElementById('kpi-taxa-conversao').textContent = `${taxa}% conversão`;
   document.getElementById('kpi-nao-comprou').textContent = naoComprouCount;
 
-  // Lista de Testes Vencidos
   const vencidosEl = document.getElementById('dash-vencidos-list');
   if (vencidosList.length === 0) {
     vencidosEl.innerHTML = '<p class="text-slate-500 text-xs">Nenhum cliente com teste vencido.</p>';
@@ -319,7 +424,6 @@ function renderDashboard() {
     }).join('');
   }
 
-  // Performance por Cupom
   const cuponsMap = {};
   pessoasData.forEach(p => {
     const c = (p.cupom || 'SEM CUPOM').toUpperCase();
@@ -529,7 +633,6 @@ function renderClientes() {
     );
   });
 
-  // Render Lista
   const tbody = document.getElementById('clientes-table-body');
   if (filtered.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-xs text-slate-500">Nenhum cliente encontrado.</td></tr>`;
@@ -602,7 +705,6 @@ function renderClientes() {
     }).join('');
   }
 
-  // Render Kanban
   ['testando', 'comprou', 'nao_comprou'].forEach(col => {
     const items = filtered.filter(p => normalizeStatusVenda(p.status_venda) === col);
     document.getElementById(`kanban-count-${col}`).textContent = items.length;
@@ -707,7 +809,6 @@ async function saveCliente(e) {
     atualizado_em: new Date().toISOString()
   };
 
-  // Garante existência na tabela clientes caso a Foreign Key (pessoas.cnpj -> clientes.cnpj) exija
   await sb.from('clientes').upsert(
     { cnpj: cnpjFormatted, email: payload.email, telefone: payload.telefone, cupom: payload.cupom },
     { onConflict: 'cnpj' }
@@ -723,7 +824,6 @@ async function saveCliente(e) {
     savedPessoaId = data.id;
   }
 
-  // Se veio da conversão de um Lead, vincula o pessoa_id no Lead
   if (fromLeadId && savedPessoaId) {
     await sb.from('crm_leads').update({ pessoa_id: savedPessoaId }).eq('id', fromLeadId);
     await sb.from('crm_interacoes').insert([{
@@ -742,7 +842,7 @@ async function quickSetClienteStatus(id, newStatus) {
   let motivo = null;
   if (newStatus === 'nao_comprou') {
     motivo = prompt('Informe o motivo da não compra (opcional):', 'Não respondeu após teste');
-    if (motivo === null) return; // Usuário cancelou
+    if (motivo === null) return;
   }
 
   await sb.from('pessoas').update({
@@ -767,15 +867,19 @@ async function deleteCliente(id) {
 }
 
 // ============================================================================
-// IMPORTAÇÃO VISUAL DE PLANILHAS & EXPORTAÇÃO P/ DISPARADOR
+// IMPORTAÇÃO VISUAL + CRUZAMENTO INTELIGENTE 9º DÍGITO + REVISÃO EDITÁVEL
 // ============================================================================
 function openImportModal(mode) {
   importMode = mode;
   parsedSheetRows = [];
   parsedSheetHeaders = [];
+  reviewState = { activeTab: 'primary', toInsert: [], duplicates: [], matchedUpdates: [], unmatchedNew: [] };
+
   document.getElementById('import-file-input').value = '';
   document.getElementById('import-preview-container').classList.add('hidden');
-  document.getElementById('btn-confirm-import').disabled = true;
+  document.getElementById('btn-analyze-import').disabled = true;
+
+  backToImportStep1();
 
   if (mode === 'novo') {
     document.getElementById('import-modal-title').textContent = 'Importar Planilha de Novos Leads';
@@ -786,6 +890,14 @@ function openImportModal(mode) {
   }
 
   openModal('modal-import');
+}
+
+function backToImportStep1() {
+  document.getElementById('import-step-1').classList.remove('hidden');
+  document.getElementById('import-step-2').classList.add('hidden');
+  document.getElementById('btn-back-step-1').classList.add('hidden');
+  document.getElementById('btn-analyze-import').classList.remove('hidden');
+  document.getElementById('btn-confirm-import').classList.add('hidden');
 }
 
 function handleFileSelect(event) {
@@ -824,13 +936,14 @@ function renderImportPreviewTable() {
       ]
     : [
         { value: 'ignore', label: '-- Ignorar Coluna --' },
-        { value: 'telefone', label: 'Telefone (Chave Cruzamento) *' },
-        { value: 'cnpj', label: 'CNPJ (Chave Alternativa)' },
+        { value: 'telefone', label: 'Telefone WhatsApp *' },
+        { value: 'cnpj', label: 'CNPJ' },
+        { value: 'razao_social', label: 'Empresa / Razão Social' },
+        { value: 'nome_contato', label: 'Nome do Contato' },
         { value: 'status', label: 'Status (enviado / erro) *' },
         { value: 'motivo_erro', label: 'Motivo do Erro' }
       ];
 
-  // Auto-detecção inteligente pelo nome do cabeçalho
   const guessField = (header) => {
     const h = header.toLowerCase();
     if (h.includes('tel') || h.includes('cel') || h.includes('whats') || h.includes('fone')) return 'telefone';
@@ -874,12 +987,16 @@ function renderImportPreviewTable() {
   `;
 
   document.getElementById('import-preview-table').innerHTML = theadHtml + tbodyHtml;
-  document.getElementById('import-rows-summary').textContent = `${parsedSheetRows.length} linhas prontas para processar`;
+  document.getElementById('import-rows-summary').textContent = `${parsedSheetRows.length} linhas prontas para análise`;
   document.getElementById('import-preview-container').classList.remove('hidden');
-  document.getElementById('btn-confirm-import').disabled = false;
+  document.getElementById('btn-analyze-import').disabled = false;
 }
 
-async function executeImport() {
+/**
+ * Etapa 2: Executa o cruzamento inteligente (com e sem 9º dígito + CNPJ)
+ * e prepara os arrays editáveis antes de gravar no Supabase.
+ */
+function analyzeImportRows() {
   const mappers = Array.from(document.querySelectorAll('.col-mapper'));
   const colMap = {};
   mappers.forEach(sel => {
@@ -892,68 +1009,396 @@ async function executeImport() {
     return alert('Mapeie pelo menos a coluna de Telefone (ou CNPJ).');
   }
 
-  const btn = document.getElementById('btn-confirm-import');
-  btn.disabled = true;
-  btn.textContent = 'Processando...';
-
-  if (importMode === 'novo') {
-    const defaultCupom = document.getElementById('import-default-cupom').value.trim().toUpperCase();
-    const existingPhones = new Set(leadsData.map(l => normalizePhone(l.telefone)));
-    const toInsert = [];
-
-    parsedSheetRows.forEach(row => {
-      const phone = normalizePhone(row[colMap.telefone]);
-      if (!phone || existingPhones.has(phone)) return;
-      existingPhones.add(phone);
-
-      toInsert.push({
-        telefone: phone,
-        cnpj: colMap.cnpj && row[colMap.cnpj] ? formatCNPJ(row[colMap.cnpj]) : null,
-        razao_social: colMap.razao_social ? String(row[colMap.razao_social]).trim() : null,
-        nome_contato: colMap.nome_contato ? String(row[colMap.nome_contato]).trim() : null,
-        email: colMap.email ? String(row[colMap.email]).trim().toLowerCase() : null,
-        cupom: (colMap.cupom && row[colMap.cupom] ? String(row[colMap.cupom]).trim().toUpperCase() : defaultCupom) || null,
-        status: 'nao_enviado'
-      });
-    });
-
-    if (toInsert.length > 0) {
-      await sb.from('crm_leads').insert(toInsert);
-    }
-    alert(`${toInsert.length} novos leads importados com sucesso! (${parsedSheetRows.length - toInsert.length} duplicados/inválidos ignorados)`);
-  } else {
-    // Modo Retorno do Disparador
-    if (!colMap.status) {
-      btn.disabled = false;
-      btn.textContent = 'Confirmar Importação';
-      return alert('Mapeie a coluna de Status para sincronizar o retorno.');
-    }
-
-    let updatedCount = 0;
-    for (const row of parsedSheetRows) {
-      const phone = colMap.telefone ? normalizePhone(row[colMap.telefone]) : '';
-      const rawStatus = String(row[colMap.status] || '').toLowerCase().trim();
-      const motivoErro = colMap.motivo_erro ? String(row[colMap.motivo_erro] || '').trim() : '';
-
-      let newStatus = null;
-      if (rawStatus.includes('enviado') || rawStatus === 'ok' || rawStatus === 'sucesso') newStatus = 'enviado';
-      else if (rawStatus.includes('erro') || rawStatus.includes('falha')) newStatus = 'erro';
-
-      if (!newStatus || !phone) continue;
-
-      const matchLead = leadsData.find(l => normalizePhone(l.telefone) === phone);
-      if (matchLead) {
-        await sb.from('crm_leads').update({
-          status: newStatus,
-          motivo_erro: newStatus === 'erro' ? (motivoErro || 'Erro reportado pelo disparador') : null
-        }).eq('id', matchLead.id);
-        updatedCount++;
-      }
-    }
-    alert(`${updatedCount} leads atualizados com o retorno do disparador!`);
+  if (importMode === 'retorno' && !colMap.status) {
+    return alert('Mapeie a coluna de Status para sincronizar o retorno.');
   }
 
-  btn.textContent = 'Confirmar Importação';
+  const lookupIndex = buildLeadsLookupIndex();
+  const seenInSheetKeys = new Set();
+
+  reviewState.toInsert = [];
+  reviewState.duplicates = [];
+  reviewState.matchedUpdates = [];
+  reviewState.unmatchedNew = [];
+  reviewState.activeTab = 'primary';
+
+  const defaultCupom = document.getElementById('import-default-cupom').value.trim().toUpperCase();
+
+  parsedSheetRows.forEach((row, index) => {
+    const rawPhone = colMap.telefone ? String(row[colMap.telefone] || '') : '';
+    const normPhone = normalizePhone(rawPhone);
+    const rawCnpj = colMap.cnpj ? String(row[colMap.cnpj] || '') : '';
+    const formattedCnpj = onlyDigits(rawCnpj).length === 14 ? formatCNPJ(rawCnpj) : '';
+    const razao = colMap.razao_social ? String(row[colMap.razao_social] || '').trim() : '';
+    const contato = colMap.nome_contato ? String(row[colMap.nome_contato] || '').trim() : '';
+    const email = colMap.email ? String(row[colMap.email] || '').trim().toLowerCase() : '';
+    const cupom = (colMap.cupom && row[colMap.cupom] ? String(row[colMap.cupom]).trim().toUpperCase() : defaultCupom) || '';
+
+    if (!normPhone && !formattedCnpj) return;
+
+    const match = findMatchingLead(normPhone, formattedCnpj, lookupIndex);
+
+    if (importMode === 'novo') {
+      const keys = getPhoneMatchKeys(normPhone);
+      const isDuplicateInSheet = keys.some(k => seenInSheetKeys.has(k));
+      keys.forEach(k => seenInSheetKeys.add(k));
+
+      if (match || isDuplicateInSheet) {
+        reviewState.duplicates.push({
+          rowNum: index + 2,
+          telefone: normPhone,
+          cnpj: formattedCnpj,
+          razao_social: razao || contato,
+          motivo: match ? `Já existe no banco (${match.matchType})` : 'Duplicado na própria planilha'
+        });
+      } else {
+        reviewState.toInsert.push({
+          include: true,
+          telefone: normPhone,
+          cnpj: formattedCnpj,
+          razao_social: razao,
+          nome_contato: contato,
+          email: email,
+          cupom: cupom,
+          status: 'nao_enviado'
+        });
+      }
+    } else {
+      // Modo Retorno do Disparador
+      const parsedStatus = parseDisparoStatus(row[colMap.status]);
+      const motivoErro = colMap.motivo_erro ? String(row[colMap.motivo_erro] || '').trim() : '';
+
+      if (match) {
+        reviewState.matchedUpdates.push({
+          include: true,
+          lead_id: match.lead.id,
+          lead_nome: match.lead.razao_social || match.lead.nome_contato || 'Sem Nome',
+          lead_telefone: match.lead.telefone,
+          sheet_telefone: normPhone,
+          matchType: match.matchType,
+          oldStatus: match.lead.status,
+          newStatus: parsedStatus,
+          motivo_erro: parsedStatus === 'erro' ? (motivoErro || 'Erro reportado pelo disparador') : ''
+        });
+      } else {
+        // Não encontrado no banco -> vai para janela de ajuste e importação opcional
+        reviewState.unmatchedNew.push({
+          include: true,
+          telefone: normPhone,
+          cnpj: formattedCnpj,
+          razao_social: razao,
+          nome_contato: contato,
+          cupom: cupom,
+          status: parsedStatus,
+          motivo_erro: parsedStatus === 'erro' ? (motivoErro || 'Erro reportado pelo disparador') : ''
+        });
+      }
+    }
+  });
+
+  // Se no retorno houver não encontrados e nenhum encontrado, já abre direto na aba de Não Encontrados
+  if (importMode === 'retorno' && reviewState.matchedUpdates.length === 0 && reviewState.unmatchedNew.length > 0) {
+    reviewState.activeTab = 'secondary';
+  }
+
+  document.getElementById('import-step-1').classList.add('hidden');
+  document.getElementById('import-step-2').classList.remove('hidden');
+  document.getElementById('btn-back-step-1').classList.remove('hidden');
+  document.getElementById('btn-analyze-import').classList.add('hidden');
+  document.getElementById('btn-confirm-import').classList.remove('hidden');
+
+  renderReviewScreen();
+}
+
+function setReviewTab(tab) {
+  reviewState.activeTab = tab;
+  renderReviewScreen();
+}
+
+function renderReviewScreen() {
+  const cardsEl = document.getElementById('review-summary-cards');
+  const tabsEl = document.getElementById('review-tabs-bar');
+  const tableEl = document.getElementById('review-table');
+
+  if (importMode === 'novo') {
+    const activeInsertCount = reviewState.toInsert.filter(r => r.include).length;
+    cardsEl.innerHTML = `
+      <div class="bg-bgInput/80 border border-emerald-500/40 rounded-xl p-3">
+        <div class="text-[11px] text-emerald-400 font-semibold">NOVOS PRONTOS P/ IMPORTAR</div>
+        <div class="text-xl font-bold text-white mt-0.5">${activeInsertCount} <span class="text-xs font-normal text-slate-400">de ${reviewState.toInsert.length}</span></div>
+      </div>
+      <div class="bg-bgInput/80 border border-amber-500/30 rounded-xl p-3">
+        <div class="text-[11px] text-amber-400 font-semibold">DUPLICADOS (COM/SEM 9º DÍGITO)</div>
+        <div class="text-xl font-bold text-amber-300 mt-0.5">${reviewState.duplicates.length}</div>
+      </div>
+      <div class="bg-bgInput/80 border border-borderCard rounded-xl p-3">
+        <div class="text-[11px] text-slate-400 font-semibold">TOTAL LIDO DA PLANILHA</div>
+        <div class="text-xl font-bold text-slate-200 mt-0.5">${parsedSheetRows.length}</div>
+      </div>
+    `;
+
+    tabsEl.innerHTML = `
+      <button onclick="setReviewTab('primary')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold ${reviewState.activeTab === 'primary' ? 'bg-brandBlue text-white' : 'bg-bgInput text-slate-400'}">
+        Novos Leads (${reviewState.toInsert.length})
+      </button>
+      <button onclick="setReviewTab('secondary')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold ${reviewState.activeTab === 'secondary' ? 'bg-amber-600 text-white' : 'bg-bgInput text-slate-400'}">
+        Duplicados Ignorados (${reviewState.duplicates.length})
+      </button>
+    `;
+
+    if (reviewState.activeTab === 'primary') {
+      tableEl.innerHTML = `
+        <thead class="bg-bgSidebar border-b border-borderCard text-[11px] text-slate-400 uppercase">
+          <tr>
+            <th class="p-2.5 w-10 text-center">Usar</th>
+            <th class="p-2.5">Telefone WhatsApp</th>
+            <th class="p-2.5">Empresa / Razão Social</th>
+            <th class="p-2.5">Contato</th>
+            <th class="p-2.5">CNPJ</th>
+            <th class="p-2.5">Cupom</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-borderCard/60">
+          ${reviewState.toInsert.map((item, idx) => `
+            <tr class="${item.include ? '' : 'opacity-40'}">
+              <td class="p-2 text-center">
+                <input type="checkbox" ${item.include ? 'checked' : ''} onchange="reviewState.toInsert[${idx}].include = this.checked; renderReviewScreen();" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.telefone}" onchange="reviewState.toInsert[${idx}].telefone = normalizePhone(this.value)"
+                  class="w-36 bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white font-mono" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.razao_social}" onchange="reviewState.toInsert[${idx}].razao_social = this.value"
+                  class="w-full bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.nome_contato}" onchange="reviewState.toInsert[${idx}].nome_contato = this.value"
+                  class="w-36 bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.cnpj}" onchange="reviewState.toInsert[${idx}].cnpj = formatCNPJ(this.value)"
+                  class="w-36 bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white font-mono" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.cupom}" onchange="reviewState.toInsert[${idx}].cupom = this.value.toUpperCase()"
+                  class="w-24 bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white uppercase" />
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      `;
+    } else {
+      tableEl.innerHTML = `
+        <thead class="bg-bgSidebar border-b border-borderCard text-[11px] text-slate-400 uppercase">
+          <tr>
+            <th class="p-2.5">Linha</th>
+            <th class="p-2.5">Telefone</th>
+            <th class="p-2.5">Empresa / Contato</th>
+            <th class="p-2.5">Motivo</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-borderCard/60">
+          ${reviewState.duplicates.map(d => `
+            <tr>
+              <td class="p-2.5 text-slate-400">#${d.rowNum}</td>
+              <td class="p-2.5 font-mono text-slate-300">${d.telefone}</td>
+              <td class="p-2.5 text-slate-300">${d.razao_social || '-'}</td>
+              <td class="p-2.5 text-amber-400">${d.motivo}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      `;
+    }
+  } else {
+    // MODO SINCRONIZAR RETORNO
+    const activeUpdates = reviewState.matchedUpdates.filter(r => r.include).length;
+    const activeNewImports = reviewState.unmatchedNew.filter(r => r.include).length;
+
+    cardsEl.innerHTML = `
+      <div class="bg-bgInput/80 border border-sky-500/40 rounded-xl p-3">
+        <div class="text-[11px] text-sky-400 font-semibold">ENCONTRADOS NO BANCO (ATUALIZAR)</div>
+        <div class="text-xl font-bold text-white mt-0.5">${activeUpdates} <span class="text-xs font-normal text-slate-400">de ${reviewState.matchedUpdates.length}</span></div>
+      </div>
+      <div class="bg-bgInput/80 border border-amber-500/40 rounded-xl p-3">
+        <div class="text-[11px] text-amber-400 font-semibold">NÃO ENCONTRADOS (IMPORTAR COMO NOVOS)</div>
+        <div class="text-xl font-bold text-amber-300 mt-0.5">${activeNewImports} <span class="text-xs font-normal text-slate-400">selecionados</span></div>
+      </div>
+      <div class="bg-bgInput/80 border border-borderCard rounded-xl p-3">
+        <div class="text-[11px] text-slate-400 font-semibold">TOTAL LIDO DO RETORNO</div>
+        <div class="text-xl font-bold text-slate-200 mt-0.5">${parsedSheetRows.length}</div>
+      </div>
+    `;
+
+    tabsEl.innerHTML = `
+      <button onclick="setReviewTab('primary')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold ${reviewState.activeTab === 'primary' ? 'bg-brandBlue text-white' : 'bg-bgInput text-slate-400'}">
+        Encontrados p/ Atualizar (${reviewState.matchedUpdates.length})
+      </button>
+      <button onclick="setReviewTab('secondary')" class="px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 ${reviewState.activeTab === 'secondary' ? 'bg-amber-600 text-white' : 'bg-bgInput text-amber-300 border border-amber-500/40'}">
+        <i class="fa-solid fa-triangle-exclamation"></i> Não Encontrados — Ajustar & Importar (${reviewState.unmatchedNew.length})
+      </button>
+    `;
+
+    if (reviewState.activeTab === 'primary') {
+      tableEl.innerHTML = `
+        <thead class="bg-bgSidebar border-b border-borderCard text-[11px] text-slate-400 uppercase">
+          <tr>
+            <th class="p-2.5 w-10 text-center">Aplicar</th>
+            <th class="p-2.5">Lead no Banco</th>
+            <th class="p-2.5">Tel. Banco vs Planilha</th>
+            <th class="p-2.5">Cruzamento</th>
+            <th class="p-2.5">Novo Status</th>
+            <th class="p-2.5">Motivo Erro (se houver)</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-borderCard/60">
+          ${reviewState.matchedUpdates.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-500">Nenhum contato existente cruzou com a planilha. Veja a aba "Não Encontrados".</td></tr>` : ''}
+          ${reviewState.matchedUpdates.map((item, idx) => `
+            <tr class="${item.include ? '' : 'opacity-40'}">
+              <td class="p-2 text-center">
+                <input type="checkbox" ${item.include ? 'checked' : ''} onchange="reviewState.matchedUpdates[${idx}].include = this.checked; renderReviewScreen();" />
+              </td>
+              <td class="p-2 font-semibold text-white">${item.lead_nome}</td>
+              <td class="p-2 font-mono text-[11px]">
+                <div class="text-slate-200">${item.lead_telefone}</div>
+                ${item.lead_telefone !== item.sheet_telefone ? `<div class="text-amber-400">Planilha: ${item.sheet_telefone}</div>` : ''}
+              </td>
+              <td class="p-2">
+                <span class="px-2 py-0.5 rounded text-[10px] font-semibold ${item.matchType.includes('9º') ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}">
+                  ${item.matchType}
+                </span>
+              </td>
+              <td class="p-2">
+                <select onchange="reviewState.matchedUpdates[${idx}].newStatus = this.value"
+                  class="bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white font-semibold">
+                  <option value="enviado" ${item.newStatus === 'enviado' ? 'selected' : ''}>Enviado</option>
+                  <option value="erro" ${item.newStatus === 'erro' ? 'selected' : ''}>Erro</option>
+                  <option value="nao_enviado" ${item.newStatus === 'nao_enviado' ? 'selected' : ''}>Não Enviado</option>
+                </select>
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.motivo_erro}" onchange="reviewState.matchedUpdates[${idx}].motivo_erro = this.value"
+                  placeholder="Opcional" class="w-full bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white" />
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      `;
+    } else {
+      // Aba de NÃO ENCONTRADOS no retorno -> Editáveis para importar com o status da planilha
+      tableEl.innerHTML = `
+        <thead class="bg-bgSidebar border-b border-borderCard text-[11px] text-slate-400 uppercase">
+          <tr>
+            <th class="p-2.5 w-10 text-center">Importar</th>
+            <th class="p-2.5">Telefone (Ajustável)</th>
+            <th class="p-2.5">Empresa / Razão Social</th>
+            <th class="p-2.5">Contato</th>
+            <th class="p-2.5">Status (da Planilha)</th>
+            <th class="p-2.5">Motivo Erro</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-borderCard/60">
+          ${reviewState.unmatchedNew.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-500">Todos os contatos da planilha foram encontrados no banco!</td></tr>` : ''}
+          ${reviewState.unmatchedNew.map((item, idx) => `
+            <tr class="${item.include ? '' : 'opacity-40'}">
+              <td class="p-2 text-center">
+                <input type="checkbox" ${item.include ? 'checked' : ''} onchange="reviewState.unmatchedNew[${idx}].include = this.checked; renderReviewScreen();" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.telefone}" onchange="reviewState.unmatchedNew[${idx}].telefone = normalizePhone(this.value)"
+                  class="w-36 bg-bgInput border border-amber-500/40 rounded px-2 py-1 text-xs text-white font-mono" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.razao_social}" placeholder="Nome da empresa" onchange="reviewState.unmatchedNew[${idx}].razao_social = this.value"
+                  class="w-full bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white" />
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.nome_contato}" placeholder="Nome contato" onchange="reviewState.unmatchedNew[${idx}].nome_contato = this.value"
+                  class="w-32 bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white" />
+              </td>
+              <td class="p-2">
+                <select onchange="reviewState.unmatchedNew[${idx}].status = this.value"
+                  class="bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white font-semibold">
+                  <option value="enviado" ${item.status === 'enviado' ? 'selected' : ''}>Enviado</option>
+                  <option value="erro" ${item.status === 'erro' ? 'selected' : ''}>Erro</option>
+                  <option value="nao_enviado" ${item.status === 'nao_enviado' ? 'selected' : ''}>Não Enviado</option>
+                </select>
+              </td>
+              <td class="p-2">
+                <input type="text" value="${item.motivo_erro}" placeholder="Se erro..." onchange="reviewState.unmatchedNew[${idx}].motivo_erro = this.value"
+                  class="w-36 bg-bgInput border border-borderCard rounded px-2 py-1 text-xs text-white" />
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      `;
+    }
+  }
+}
+
+async function commitReviewedImport() {
+  const btn = document.getElementById('btn-confirm-import');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Gravando...';
+
+  if (importMode === 'novo') {
+    const selected = reviewState.toInsert
+      .filter(r => r.include && r.telefone)
+      .map(r => ({
+        telefone: normalizePhone(r.telefone),
+        cnpj: r.cnpj || null,
+        razao_social: r.razao_social || null,
+        nome_contato: r.nome_contato || null,
+        email: r.email || null,
+        cupom: r.cupom || null,
+        status: 'nao_enviado'
+      }));
+
+    if (selected.length > 0) {
+      const { error } = await sb.from('crm_leads').insert(selected);
+      if (error) {
+        alert('Erro ao importar leads: ' + error.message);
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco';
+        return;
+      }
+    }
+    alert(`${selected.length} novos leads importados com sucesso!`);
+  } else {
+    // 1. Atualiza os encontrados
+    const toUpdate = reviewState.matchedUpdates.filter(r => r.include);
+    for (const item of toUpdate) {
+      await sb.from('crm_leads').update({
+        status: item.newStatus,
+        motivo_erro: item.newStatus === 'erro' ? (item.motivo_erro || 'Erro no envio') : null
+      }).eq('id', item.lead_id);
+    }
+
+    // 2. Insere os não encontrados que foram aprovados/ajustados na revisão
+    const toInsertNew = reviewState.unmatchedNew
+      .filter(r => r.include && r.telefone)
+      .map(r => ({
+        telefone: normalizePhone(r.telefone),
+        cnpj: r.cnpj || null,
+        razao_social: r.razao_social || null,
+        nome_contato: r.nome_contato || null,
+        cupom: r.cupom || null,
+        status: r.status,
+        motivo_erro: r.status === 'erro' ? (r.motivo_erro || 'Erro no envio') : null
+      }));
+
+    if (toInsertNew.length > 0) {
+      const { error } = await sb.from('crm_leads').insert(toInsertNew);
+      if (error) {
+        alert('Erro ao importar contatos novos do retorno: ' + error.message);
+      }
+    }
+
+    alert(`Sincronização concluída!\n• ${toUpdate.length} leads existentes atualizados.\n• ${toInsertNew.length} contatos não encontrados importados com o status da planilha.`);
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco';
   closeModal('modal-import');
   await refreshAll();
 }
