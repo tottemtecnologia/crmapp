@@ -264,7 +264,7 @@
             <div class="flex flex-wrap items-center gap-3 flex-1">
               <div class="relative flex-1 min-w-[220px] max-w-sm">
                 <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-xs"></i>
-                <input type="text" id="lead-search" oninput="onLeadFilterChange()" placeholder="Buscar por empresa, contato, telefone, CNPJ ou TAG..."
+                <input type="text" id="lead-search" oninput="onLeadFilterChange()" placeholder="Buscar por empresa, contato, tel, CNPJ ou TAG..."
                   class="w-full bg-bgInput border border-borderCard rounded-lg pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-brandBlue" />
               </div>
 
@@ -421,7 +421,7 @@
           <h3 class="text-base font-bold text-white flex items-center gap-2">
             <i class="fa-solid fa-file-export text-sky-400"></i> Exportar Leads para Disparador
           </h3>
-          <p class="text-xs text-slate-400">Configure os filtros de status, TAG da lista e o padrão do 9º dígito.</p>
+          <p class="text-xs text-slate-400">Configure os filtros de status, TAG e o padrão do 9º dígito.</p>
         </div>
         <button onclick="closeModal('modal-export')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
       </div>
@@ -476,14 +476,14 @@
 
         <div class="grid grid-cols-3 gap-3">
           <div>
-            <label class="block text-xs text-slate-400 mb-1">TAG da Lista</label>
+            <label class="block text-xs text-slate-400 mb-1">Filtrar por TAG</label>
             <select id="exp-tag-filter" onchange="updateExportPreviewCount()"
               class="w-full bg-bgInput border border-borderCard rounded-lg px-2.5 py-2 text-xs text-white">
-              <option value="todas">Todas as TAGs</option>
+              <option value="">Todas as TAGs</option>
             </select>
           </div>
           <div>
-            <label class="block text-xs text-slate-400 mb-1">Cupom (opcional)</label>
+            <label class="block text-xs text-slate-400 mb-1">Filtrar por Cupom</label>
             <input type="text" id="exp-cupom-filter" oninput="updateExportPreviewCount()" placeholder="Todos"
               class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
           </div>
@@ -566,28 +566,32 @@
       <div class="p-5 border-b border-borderCard flex items-center justify-between">
         <div>
           <h3 id="import-modal-title" class="text-base font-bold text-white">Importar Planilha</h3>
-          <p id="import-modal-subtitle" class="text-xs text-slate-400">Passo 1: Mapeie as colunas e defina a TAG da lista • Passo 2: Revise o cruzamento e confirme.</p>
+          <p id="import-modal-subtitle" class="text-xs text-slate-400">Passo 1: Selecione a planilha, defina a TAG da lista e mapeie as colunas • Passo 2: Revise antes de gravar.</p>
         </div>
         <button onclick="closeModal('modal-import')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
       </div>
 
       <!-- ETAPA 1 -->
       <div id="import-step-1" class="p-5 overflow-y-auto space-y-5 flex-1">
-        <div class="flex flex-wrap items-center gap-4">
-          <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" onchange="handleFileSelect(event)"
-            class="block text-xs text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-brandBlue file:text-white hover:file:bg-brandBlueHover cursor-pointer" />
-
-          <div id="import-tag-wrapper" class="flex items-center gap-2 bg-bgInput/60 border border-brandBlue/40 px-3 py-1.5 rounded-lg">
-            <i class="fa-solid fa-tag text-brandBlue text-xs"></i>
-            <label class="text-xs text-slate-300 font-semibold">TAG da Lista:</label>
-            <input type="text" id="import-default-tag" placeholder="Ex: LISTA_GOIAS_NOV26"
-              class="bg-bgMain border border-borderCard rounded px-2.5 py-1 text-xs text-white uppercase w-48 focus:outline-none focus:border-brandBlue" />
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end bg-bgSidebar/60 border border-borderCard rounded-xl p-4">
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 mb-1.5">1. Arquivo da Planilha (.xlsx / .csv)</label>
+            <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" onchange="handleFileSelect(event)"
+              class="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-3.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-brandBlue file:text-white hover:file:bg-brandBlueHover cursor-pointer" />
           </div>
 
-          <div id="import-cupom-wrapper" class="flex items-center gap-2">
-            <label class="text-xs text-slate-400">Cupom padrão:</label>
+          <div>
+            <label class="block text-xs font-semibold text-purple-300 mb-1.5">
+              <i class="fa-solid fa-tag mr-1"></i> 2. TAG de Identificação da Lista *
+            </label>
+            <input type="text" id="import-list-tag" placeholder="Ex: LISTA_COMPRASGOV_NOV"
+              class="w-full bg-bgInput border border-purple-500/50 rounded-lg px-3 py-2 text-xs text-white uppercase font-semibold focus:outline-none focus:border-purple-400" />
+          </div>
+
+          <div id="import-cupom-wrapper">
+            <label class="block text-xs text-slate-400 mb-1.5">3. Cupom Padrão (opcional)</label>
             <input type="text" id="import-default-cupom" placeholder="Ex: RODRIGUES"
-              class="bg-bgInput border border-borderCard rounded-lg px-3 py-1.5 text-xs text-white uppercase w-32" />
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
           </div>
         </div>
 
@@ -685,15 +689,15 @@
               class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
           </div>
           <div>
-            <label class="block text-xs text-slate-400 mb-1">TAG da Lista (Identificação)</label>
-            <input type="text" id="lead-tag" placeholder="Ex: LISTA_GOIAS_NOV26"
-              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+            <label class="block text-xs text-purple-300 mb-1">TAG da Lista</label>
+            <input type="text" id="lead-tag" placeholder="Ex: LISTA_MANUAL"
+              class="w-full bg-bgInput border border-purple-500/40 rounded-lg px-3 py-2 text-xs text-white uppercase" />
           </div>
         </div>
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label class="block text-xs text-slate-400 mb-1">Cupom / Vendedor</label>
+            <label class="block text-xs text-slate-400 mb-1">Cupom / Origem</label>
             <input type="text" id="lead-cupom" placeholder="RODRIGUES"
               class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
           </div>
