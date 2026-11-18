@@ -16,6 +16,12 @@ let parsedSheetRows = [];
 let parsedSheetHeaders = [];
 let activeTimelineTarget = { lead_id: null, pessoa_id: null };
 
+// Estado de paginação dos Leads
+let leadsPagination = {
+  currentPage: 1,
+  pageSize: 50
+};
+
 let reviewState = {
   activeTab: 'primary',
   toInsert: [],
@@ -89,37 +95,85 @@ function logout() {
 }
 
 async function refreshAll() {
+  const syncBadge = document.getElementById('db-sync-badge');
+  if (syncBadge) {
+    syncBadge.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-sky-400"></i> Sincronizando...';
+  }
+
   await Promise.all([loadLeads(), loadPessoas()]);
+
+  if (syncBadge) {
+    syncBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Conectado ao Supabase';
+  }
+
   renderDashboard();
   renderLeadsTable();
   renderClientes();
 }
 
 // ============================================================================
-// CARREGAMENTO DE DADOS
+// CARREGAMENTO DE DADOS (COM PAGINAÇÃO AUTOMÁTICA > 1.000 REGISTROS)
 // ============================================================================
 async function loadLeads() {
-  const { data, error } = await sb
-    .from('crm_leads')
-    .select('*')
-    .order('criado_em', { ascending: false });
+  let allLeads = [];
+  let from = 0;
+  const batchSize = 1000;
+  let hasMore = true;
 
-  if (!error) {
-    leadsData = data || [];
-    document.getElementById('badge-leads').textContent = leadsData.length;
+  while (hasMore) {
+    const { data, error } = await sb
+      .from('crm_leads')
+      .select('*')
+      .order('criado_em', { ascending: false })
+      .range(from, from + batchSize - 1);
+
+    if (error) {
+      console.error('Erro ao carregar leads:', error);
+      break;
+    }
+
+    if (data && data.length > 0) {
+      allLeads = allLeads.concat(data);
+      from += batchSize;
+      if (data.length < batchSize) hasMore = false;
+    } else {
+      hasMore = false;
+    }
   }
+
+  leadsData = allLeads;
+  document.getElementById('badge-leads').textContent = leadsData.length;
 }
 
 async function loadPessoas() {
-  const { data, error } = await sb
-    .from('pessoas')
-    .select('*')
-    .order('criado_em', { ascending: false });
+  let allPessoas = [];
+  let from = 0;
+  const batchSize = 1000;
+  let hasMore = true;
 
-  if (!error) {
-    pessoasData = data || [];
-    document.getElementById('badge-clientes').textContent = pessoasData.length;
+  while (hasMore) {
+    const { data, error } = await sb
+      .from('pessoas')
+      .select('*')
+      .order('criado_em', { ascending: false })
+      .range(from, from + batchSize - 1);
+
+    if (error) {
+      console.error('Erro ao carregar pessoas:', error);
+      break;
+    }
+
+    if (data && data.length > 0) {
+      allPessoas = allPessoas.concat(data);
+      from += batchSize;
+      if (data.length < batchSize) hasMore = false;
+    } else {
+      hasMore = false;
+    }
   }
+
+  pessoasData = allPessoas;
+  document.getElementById('badge-clientes').textContent = pessoasData.length;
 }
 
 // ============================================================================
@@ -145,8 +199,16 @@ function switchTab(tabName) {
 }
 
 // ============================================================================
-// UTILITÁRIOS DE TELEFONE (9º DÍGITO) E FORMATAÇÃO
+// UTILITÁRIOS DE TELEFONE (9º DÍGITO), LOTES E FORMATAÇÃO
 // ============================================================================
+function chunkArray(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
 function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
 }
@@ -164,17 +226,11 @@ function normalizePhone(phone) {
   return d;
 }
 
-/**
- * Formata o telefone conforme a regra do 9º dígito escolhida na exportação:
- * - 'keep': mantém original
- * - 'add9': garante 55 + DDD + 9 + 8 dígitos (para celulares)
- * - 'remove9': remove o 9 após o DDD (55 + DDD + 8 dígitos)
- */
 function formatPhoneNinthDigit(rawPhone, mode = 'keep') {
   const norm = normalizePhone(rawPhone);
   if (!norm || mode === 'keep' || !norm.startsWith('55')) return norm;
 
-  const local = norm.slice(2); // DDD + número
+  const local = norm.slice(2);
   if (mode === 'add9') {
     if (local.length === 10 && ['6', '7', '8', '9'].includes(local[2])) {
       return '55' + local.slice(0, 2) + '9' + local.slice(2);
@@ -277,7 +333,7 @@ function parseDisparoStatus(rawStatus) {
 }
 
 // ============================================================================
-// LOAD BALANCE DE APIS DE CNPJ (BRASILAPI + RECEITAWS + MINHARECEITA)
+// LOAD BALANCE DE APIS DE CNPJ (BRASILAPI + MINHARECEITA + RECEITAWS)
 // ============================================================================
 const CNPJ_PROVIDERS = [
   {
@@ -358,10 +414,6 @@ const CNPJ_PROVIDERS = [
   }
 ];
 
-/**
- * Consulta CNPJ fazendo rotação (Load Balance) entre os 3 provedores
- * e failover automático caso algum dê 429 ou erro.
- */
 async function fetchCNPJLoadBalanced(rawCnpj, preferredStartIdx = null) {
   const cnpj = onlyDigits(rawCnpj);
   if (cnpj.length !== 14) return null;
@@ -377,14 +429,12 @@ async function fetchCNPJLoadBalanced(rawCnpj, preferredStartIdx = null) {
         return result;
       }
     } catch (err) {
-      // Se deu 429 ou erro de rede, pula imediatamente para o próximo provedor da fila
       console.warn(`[LoadBalance] ${provider.name} indisponível ou 429, alternando...`);
     }
   }
   return null;
 }
 
-// Busca individual apenas da Razão Social dentro do Modal de Lead
 async function consultarRazaoSocialNoModalLead() {
   const cnpj = document.getElementById('lead-cnpj').value;
   if (onlyDigits(cnpj).length !== 14) {
@@ -408,7 +458,6 @@ async function consultarRazaoSocialNoModalLead() {
   document.getElementById('lead-razao').value = info.razao_social;
 }
 
-// Busca individual rápida direto da linha da tabela de Leads (1 clique -> salva no banco)
 async function quickEnrichLeadRazao(leadId) {
   const lead = leadsData.find(l => l.id === leadId);
   if (!lead || onlyDigits(lead.cnpj).length !== 14) return;
@@ -514,7 +563,6 @@ async function startBackgroundEnrichment() {
       await sb.from('crm_leads').update({ razao_social: info.razao_social }).eq('id', lead.id);
       lead.razao_social = info.razao_social;
       bgEnrichWorker.success++;
-      // Atualiza a tabela suavemente a cada 3 registros para não travar a digitação do usuário
       if (bgEnrichWorker.success % 3 === 0) renderLeadsTable();
     } else {
       bgEnrichWorker.failed++;
@@ -522,8 +570,6 @@ async function startBackgroundEnrichment() {
 
     updateBgEnrichmentUI(`Último: ${info?.fonte || providerName}`);
 
-    // Cadência inteligente: como intercala entre 3 APIs diferentes, 850ms entre chamadas
-    // mantém cada API abaixo de ~23 req/min (evitando 429 mesmo na ReceitaWS)
     if (i < bgEnrichWorker.queue.length - 1 && !bgEnrichWorker.cancelled) {
       await sleep(850);
     }
@@ -568,7 +614,6 @@ function stopBackgroundEnrichment() {
   bgEnrichWorker.paused = false;
 }
 
-// Consulta completa para o Modal de Cliente (Tabela Pessoas)
 async function consultarCNPJParaCliente() {
   const btn = document.getElementById('btn-busca-cnpj-cli');
   btn.disabled = true;
@@ -721,8 +766,24 @@ function renderDashboard() {
 }
 
 // ============================================================================
-// CRUD E RENDERIZAÇÃO DE LEADS
+// PAGINAÇÃO, CRUD E RENDERIZAÇÃO DE LEADS
 // ============================================================================
+function onLeadFilterChange() {
+  leadsPagination.currentPage = 1;
+  renderLeadsTable();
+}
+
+function changeLeadsPageSize(newSize) {
+  leadsPagination.pageSize = Number(newSize) || 50;
+  leadsPagination.currentPage = 1;
+  renderLeadsTable();
+}
+
+function goToLeadsPage(page) {
+  leadsPagination.currentPage = page;
+  renderLeadsTable();
+}
+
 function renderLeadsTable() {
   const term = document.getElementById('lead-search').value.toLowerCase();
   const statusFilter = document.getElementById('lead-filter-status').value;
@@ -741,15 +802,33 @@ function renderLeadsTable() {
     return l.status === statusFilter;
   });
 
-  document.getElementById('leads-count-label').textContent = `Mostrando ${filtered.length} registros`;
+  const totalFiltered = filtered.length;
+  const pageSize = leadsPagination.pageSize;
+  const totalPages = Math.max(1, Math.ceil(totalFiltered / pageSize));
+
+  if (leadsPagination.currentPage > totalPages) {
+    leadsPagination.currentPage = totalPages;
+  }
+
+  const startIdx = (leadsPagination.currentPage - 1) * pageSize;
+  const endIdx = Math.min(startIdx + pageSize, totalFiltered);
+  const pageItems = filtered.slice(startIdx, endIdx);
+
+  document.getElementById('leads-count-label').textContent = totalFiltered === 0
+    ? 'Mostrando 0 registros'
+    : `Mostrando ${startIdx + 1}–${endIdx} de ${totalFiltered}`;
+
+  document.getElementById('leads-pagination-info').textContent = `Página ${leadsPagination.currentPage} de ${totalPages} (${totalFiltered} filtrados)`;
+
+  renderLeadsPaginationControls(leadsPagination.currentPage, totalPages);
 
   const tbody = document.getElementById('leads-table-body');
-  if (filtered.length === 0) {
+  if (pageItems.length === 0) {
     tbody.innerHTML = `<tr><td colspan="6" class="py-8 text-center text-xs text-slate-500">Nenhum lead encontrado.</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = filtered.map(l => {
+  tbody.innerHTML = pageItems.map(l => {
     const statusBadges = {
       nao_enviado: '<span class="px-2.5 py-1 rounded-full text-[11px] font-medium bg-slate-800 text-slate-300 border border-slate-700">Não Enviado</span>',
       enviado: '<span class="px-2.5 py-1 rounded-full text-[11px] font-medium bg-sky-950 text-sky-400 border border-sky-700/50">Enviado</span>',
@@ -815,6 +894,48 @@ function renderLeadsTable() {
       </tr>
     `;
   }).join('');
+}
+
+function renderLeadsPaginationControls(current, total) {
+  const container = document.getElementById('leads-pagination-controls');
+  if (total <= 1) {
+    container.innerHTML = '';
+    return;
+  }
+
+  let html = `
+    <button onclick="goToLeadsPage(${current - 1})" ${current === 1 ? 'disabled' : ''}
+      class="px-2.5 py-1 rounded-lg text-xs bg-bgInput hover:bg-slate-700 disabled:opacity-40 text-slate-200">
+      <i class="fa-solid fa-chevron-left"></i> Anterior
+    </button>
+  `;
+
+  // Gera janela de páginas ao redor da atual (ex: 1 ... 4 5 6 ... 129)
+  const pages = new Set([1, total, current, current - 1, current + 1, current - 2, current + 2]);
+  const sortedPages = Array.from(pages).filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+
+  let prev = 0;
+  for (const p of sortedPages) {
+    if (prev && p - prev > 1) {
+      html += `<span class="px-1.5 text-xs text-slate-500">...</span>`;
+    }
+    html += `
+      <button onclick="goToLeadsPage(${p})"
+        class="px-2.5 py-1 rounded-lg text-xs font-semibold transition ${p === current ? 'bg-brandBlue text-white' : 'bg-bgInput hover:bg-slate-700 text-slate-300'}">
+        ${p}
+      </button>
+    `;
+    prev = p;
+  }
+
+  html += `
+    <button onclick="goToLeadsPage(${current + 1})" ${current === total ? 'disabled' : ''}
+      class="px-2.5 py-1 rounded-lg text-xs bg-bgInput hover:bg-slate-700 disabled:opacity-40 text-slate-200">
+      Próxima <i class="fa-solid fa-chevron-right"></i>
+    </button>
+  `;
+
+  container.innerHTML = html;
 }
 
 function openLeadModal(id = null) {
@@ -1234,7 +1355,7 @@ function renderImportPreviewTable() {
     const h = header.toLowerCase();
     if (h.includes('tel') || h.includes('cel') || h.includes('whats') || h.includes('fone')) return 'telefone';
     if (h.includes('cnpj')) return 'cnpj';
-    if (h.includes('razao') || h.includes('empresa') || h.includes('fantasia')) return 'razao_social';
+    if (h.includes('razao') || h.includes('razão') || h.includes('empresa') || h.includes('fantasia')) return 'razao_social';
     if (h.includes('nome') || h.includes('contato') || h.includes('socio')) return 'nome_contato';
     if (h.includes('mail')) return 'email';
     if (h.includes('cupom')) return 'cupom';
@@ -1426,6 +1547,8 @@ function renderReviewScreen() {
     `;
 
     if (reviewState.activeTab === 'primary') {
+      // Limita a exibição visual da prévia editável aos primeiros 300 para manter o navegador leve
+      const visibleItems = reviewState.toInsert.slice(0, 300);
       tableEl.innerHTML = `
         <thead class="bg-bgSidebar border-b border-borderCard text-[11px] text-slate-400 uppercase">
           <tr>
@@ -1438,7 +1561,7 @@ function renderReviewScreen() {
           </tr>
         </thead>
         <tbody class="divide-y divide-borderCard/60">
-          ${reviewState.toInsert.map((item, idx) => `
+          ${visibleItems.map((item, idx) => `
             <tr class="${item.include ? '' : 'opacity-40'}">
               <td class="p-2 text-center">
                 <input type="checkbox" ${item.include ? 'checked' : ''} onchange="reviewState.toInsert[${idx}].include = this.checked; renderReviewScreen();" />
@@ -1465,6 +1588,7 @@ function renderReviewScreen() {
               </td>
             </tr>
           `).join('')}
+          ${reviewState.toInsert.length > 300 ? `<tr><td colspan="6" class="p-3 text-center text-xs text-sky-400 bg-bgSidebar/40">Exibindo os primeiros 300 registros na prévia. Todos os ${reviewState.toInsert.length} selecionados serão gravados em lotes ao confirmar.</td></tr>` : ''}
         </tbody>
       `;
     } else {
@@ -1478,7 +1602,7 @@ function renderReviewScreen() {
           </tr>
         </thead>
         <tbody class="divide-y divide-borderCard/60">
-          ${reviewState.duplicates.map(d => `
+          ${reviewState.duplicates.slice(0, 300).map(d => `
             <tr>
               <td class="p-2.5 text-slate-400">#${d.rowNum}</td>
               <td class="p-2.5 font-mono text-slate-300">${d.telefone}</td>
@@ -1531,7 +1655,7 @@ function renderReviewScreen() {
         </thead>
         <tbody class="divide-y divide-borderCard/60">
           ${reviewState.matchedUpdates.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-500">Nenhum contato existente cruzou com a planilha. Veja a aba "Não Encontrados".</td></tr>` : ''}
-          ${reviewState.matchedUpdates.map((item, idx) => `
+          ${reviewState.matchedUpdates.slice(0, 300).map((item, idx) => `
             <tr class="${item.include ? '' : 'opacity-40'}">
               <td class="p-2 text-center">
                 <input type="checkbox" ${item.include ? 'checked' : ''} onchange="reviewState.matchedUpdates[${idx}].include = this.checked; renderReviewScreen();" />
@@ -1576,7 +1700,7 @@ function renderReviewScreen() {
         </thead>
         <tbody class="divide-y divide-borderCard/60">
           ${reviewState.unmatchedNew.length === 0 ? `<tr><td colspan="6" class="p-6 text-center text-slate-500">Todos os contatos da planilha foram encontrados no banco!</td></tr>` : ''}
-          ${reviewState.unmatchedNew.map((item, idx) => `
+          ${reviewState.unmatchedNew.slice(0, 300).map((item, idx) => `
             <tr class="${item.include ? '' : 'opacity-40'}">
               <td class="p-2 text-center">
                 <input type="checkbox" ${item.include ? 'checked' : ''} onchange="reviewState.unmatchedNew[${idx}].include = this.checked; renderReviewScreen();" />
@@ -1616,7 +1740,7 @@ function renderReviewScreen() {
 async function commitReviewedImport() {
   const btn = document.getElementById('btn-confirm-import');
   btn.disabled = true;
-  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Gravando...';
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Gravando lotes...';
 
   if (importMode === 'novo') {
     const selected = reviewState.toInsert
@@ -1632,22 +1756,31 @@ async function commitReviewedImport() {
       }));
 
     if (selected.length > 0) {
-      const { error } = await sb.from('crm_leads').insert(selected);
-      if (error) {
-        alert('Erro ao importar leads: ' + error.message);
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco';
-        return;
+      const chunks = chunkArray(selected, 500);
+      for (const batch of chunks) {
+        const { error } = await sb.from('crm_leads').insert(batch);
+        if (error) {
+          alert('Erro ao importar lote de leads: ' + error.message);
+          btn.disabled = false;
+          btn.innerHTML = '<i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco';
+          return;
+        }
       }
     }
     alert(`${selected.length} novos leads importados com sucesso!`);
   } else {
     const toUpdate = reviewState.matchedUpdates.filter(r => r.include);
-    for (const item of toUpdate) {
-      await sb.from('crm_leads').update({
-        status: item.newStatus,
-        motivo_erro: item.newStatus === 'erro' ? (item.motivo_erro || 'Erro no envio') : null
-      }).eq('id', item.lead_id);
+    // Executa atualizações em pacotes paralelos de 25 para rapidez sem sobrecarregar
+    const updateChunks = chunkArray(toUpdate, 25);
+    for (const batch of updateChunks) {
+      await Promise.all(
+        batch.map(item =>
+          sb.from('crm_leads').update({
+            status: item.newStatus,
+            motivo_erro: item.newStatus === 'erro' ? (item.motivo_erro || 'Erro no envio') : null
+          }).eq('id', item.lead_id)
+        )
+      );
     }
 
     const toInsertNew = reviewState.unmatchedNew
@@ -1663,9 +1796,12 @@ async function commitReviewedImport() {
       }));
 
     if (toInsertNew.length > 0) {
-      const { error } = await sb.from('crm_leads').insert(toInsertNew);
-      if (error) {
-        alert('Erro ao importar contatos novos do retorno: ' + error.message);
+      const insertChunks = chunkArray(toInsertNew, 500);
+      for (const batch of insertChunks) {
+        const { error } = await sb.from('crm_leads').insert(batch);
+        if (error) {
+          alert('Erro ao importar contatos novos do retorno: ' + error.message);
+        }
       }
     }
 
