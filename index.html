@@ -109,7 +109,7 @@
       </div>
     </aside>
 
-    <main class="flex-1 flex flex-col min-w-0">
+    <main class="flex-1 flex flex-col min-w-0 relative">
       <header class="h-16 border-b border-borderCard px-6 flex items-center justify-between bg-bgMain/80 backdrop-blur sticky top-0 z-20">
         <h2 id="page-title" class="text-lg font-bold text-white">Dashboard Geral</h2>
         <div class="flex items-center gap-3">
@@ -122,6 +122,38 @@
           </button>
         </div>
       </header>
+
+      <!-- WIDGET FLUTUANTE DE ENRIQUECIMENTO EM BACKGROUND (LOAD BALANCE CNPJ) -->
+      <div id="bg-enrichment-bar" class="hidden mx-6 mt-4 bg-bgCard border border-brandBlue/50 rounded-xl p-3.5 shadow-lg flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-3 flex-1 min-w-[260px]">
+          <div class="w-8 h-8 rounded-lg bg-brandBlue/20 text-brandBlue flex items-center justify-center shrink-0">
+            <i id="bg-enrich-icon" class="fa-solid fa-server fa-beat-fade"></i>
+          </div>
+          <div class="flex-1">
+            <div class="flex items-center justify-between text-xs mb-1">
+              <span class="font-bold text-white" id="bg-enrich-title">Enriquecendo Razão Social em Background...</span>
+              <span class="text-sky-400 font-mono" id="bg-enrich-counter">0 / 0</span>
+            </div>
+            <div class="w-full bg-bgInput rounded-full h-1.5 overflow-hidden">
+              <div id="bg-enrich-progress" class="bg-brandBlue h-1.5 transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div class="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
+              <span id="bg-enrich-api-badge">API ativa: BrasilAPI</span>
+              <span id="bg-enrich-stats">Sucesso: 0 • Falhas: 0</span>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-bg-pause" onclick="toggleBackgroundEnrichmentPause()"
+            class="px-3 py-1.5 rounded-lg bg-bgInput hover:bg-slate-700 text-xs text-amber-300 font-semibold">
+            <i class="fa-solid fa-pause mr-1"></i> Pausar
+          </button>
+          <button onclick="stopBackgroundEnrichment()"
+            class="px-3 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 border border-rose-700/40 text-xs text-rose-300 font-semibold">
+            <i class="fa-solid fa-stop mr-1"></i> Parar
+          </button>
+        </div>
+      </div>
 
       <div class="p-6 space-y-6 flex-1 overflow-y-auto">
         <!-- ==================== ABA 1: DASHBOARD ==================== -->
@@ -206,7 +238,7 @@
                 <i class="fa-solid fa-file-import"></i> Importar Planilha (Novos Leads)
               </button>
 
-              <button onclick="exportLeadsForSender()"
+              <button onclick="openExportModal()"
                 class="bg-bgInput hover:bg-slate-800 border border-borderCard text-slate-200 text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
                 <i class="fa-solid fa-file-export text-sky-400"></i> Exportar p/ Disparador
               </button>
@@ -214,6 +246,11 @@
               <button onclick="openImportModal('retorno')"
                 class="bg-bgInput hover:bg-slate-800 border border-borderCard text-slate-200 text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
                 <i class="fa-solid fa-arrows-rotate text-emerald-400"></i> Sincronizar Retorno (Enviado/Erro)
+              </button>
+
+              <button onclick="openBulkEnrichModal()"
+                class="bg-bgInput hover:bg-slate-800 border border-amber-500/40 text-amber-300 text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> Alimentar Razão Social em Massa
               </button>
             </div>
 
@@ -238,6 +275,7 @@
                 <option value="enviado">Enviado</option>
                 <option value="erro">Erro no Envio</option>
                 <option value="convertido">Já Convertidos p/ Teste</option>
+                <option value="sem_razao">Sem Razão Social (com CNPJ)</option>
               </select>
             </div>
             <div class="text-xs text-slate-400" id="leads-count-label">Mostrando 0 registros</div>
@@ -352,6 +390,149 @@
     </main>
   </div>
 
+  <!-- ==================== MODAL EXPORTAÇÃO PROFISSIONAL ==================== -->
+  <div id="modal-export" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-lg shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-file-export text-sky-400"></i> Exportar Leads para Disparador
+          </h3>
+          <p class="text-xs text-slate-400">Configure os filtros de status e o padrão do 9º dígito.</p>
+        </div>
+        <button onclick="closeModal('modal-export')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <div class="p-5 space-y-5">
+        <!-- Seleção de Status -->
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-2">1. Selecione quais Status exportar:</label>
+          <div class="grid grid-cols-3 gap-2.5">
+            <label class="flex items-center gap-2 bg-bgInput border border-borderCard rounded-lg p-2.5 cursor-pointer hover:border-brandBlue">
+              <input type="checkbox" class="exp-status-cb accent-brandBlue" value="nao_enviado" checked onchange="updateExportPreviewCount()" />
+              <span class="text-xs text-white">Não Enviado</span>
+            </label>
+            <label class="flex items-center gap-2 bg-bgInput border border-borderCard rounded-lg p-2.5 cursor-pointer hover:border-brandBlue">
+              <input type="checkbox" class="exp-status-cb accent-brandBlue" value="erro" onchange="updateExportPreviewCount()" />
+              <span class="text-xs text-rose-300">Com Erro</span>
+            </label>
+            <label class="flex items-center gap-2 bg-bgInput border border-borderCard rounded-lg p-2.5 cursor-pointer hover:border-brandBlue">
+              <input type="checkbox" class="exp-status-cb accent-brandBlue" value="enviado" onchange="updateExportPreviewCount()" />
+              <span class="text-xs text-sky-300">Enviado</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Tratamento do 9º Dígito -->
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-2">2. Tratamento do 9º Dígito (Celular Brasil):</label>
+          <div class="space-y-2">
+            <label class="flex items-start gap-2.5 bg-bgInput border border-borderCard rounded-lg p-3 cursor-pointer hover:border-brandBlue">
+              <input type="radio" name="exp-ninth-digit" value="keep" checked class="mt-0.5 accent-brandBlue" onchange="updateExportPreviewCount()" />
+              <div>
+                <div class="text-xs font-semibold text-white">Manter original do cadastro</div>
+                <div class="text-[11px] text-slate-400">Exporta exatamente como está salvo no banco (ex: 5562999998888).</div>
+              </div>
+            </label>
+
+            <label class="flex items-start gap-2.5 bg-bgInput border border-borderCard rounded-lg p-3 cursor-pointer hover:border-brandBlue">
+              <input type="radio" name="exp-ninth-digit" value="add9" class="mt-0.5 accent-brandBlue" onchange="updateExportPreviewCount()" />
+              <div>
+                <div class="text-xs font-semibold text-emerald-300">Forçar COM 9º dígito (13 dígitos)</div>
+                <div class="text-[11px] text-slate-400">Adiciona o 9 após o DDD caso esteja sem (ex: 556299998888 → 5562<strong>9</strong>99998888).</div>
+              </div>
+            </label>
+
+            <label class="flex items-start gap-2.5 bg-bgInput border border-borderCard rounded-lg p-3 cursor-pointer hover:border-brandBlue">
+              <input type="radio" name="exp-ninth-digit" value="remove9" class="mt-0.5 accent-brandBlue" onchange="updateExportPreviewCount()" />
+              <div>
+                <div class="text-xs font-semibold text-amber-300">Forçar SEM 9º dígito (12 dígitos)</div>
+                <div class="text-[11px] text-slate-400">Remove o 9 após o DDD (ideal para APIs/disparadores que exigem formato sem o 9).</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Filtro Cupom & Formato -->
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Filtrar por Cupom (opcional)</label>
+            <input type="text" id="exp-cupom-filter" oninput="updateExportPreviewCount()" placeholder="Todos os cupons"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Formato do Arquivo</label>
+            <select id="exp-file-format" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white">
+              <option value="xlsx">Planilha Excel (.xlsx)</option>
+              <option value="csv">Planilha CSV (.csv)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="bg-bgSidebar border border-borderCard rounded-xl p-3 flex items-center justify-between">
+          <span class="text-xs text-slate-400">Total pronto para exportar:</span>
+          <span id="exp-total-preview" class="text-sm font-bold text-sky-400">0 contatos</span>
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-borderCard flex justify-end gap-3">
+        <button onclick="closeModal('modal-export')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+        <button id="btn-run-export" onclick="executeProfessionalExport()"
+          class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover text-white flex items-center gap-2">
+          <i class="fa-solid fa-download"></i> Baixar Planilha
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL ENRIQUECIMENTO EM MASSA (RAZÃO SOCIAL) ==================== -->
+  <div id="modal-bulk-enrich" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-md shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> Alimentar Razão Social em Massa
+          </h3>
+          <p class="text-xs text-slate-400">Consulta em background com Load Balance (BrasilAPI + ReceitaWS + MinhaReceita).</p>
+        </div>
+        <button onclick="closeModal('modal-bulk-enrich')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <div class="p-5 space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1.5">Qual grupo de Leads deseja processar?</label>
+          <select id="bulk-enrich-filter" onchange="updateBulkEnrichCount()"
+            class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2.5 text-xs text-white">
+            <option value="sem_razao_todos">Todos os Leads com CNPJ e SEM Razão Social</option>
+            <option value="nao_enviado">Apenas Status: Não Enviado (sem Razão Social)</option>
+            <option value="enviado">Apenas Status: Enviado (sem Razão Social)</option>
+            <option value="erro">Apenas Status: Erro (sem Razão Social)</option>
+            <option value="forcar_todos">Reprocessar TODOS os Leads com CNPJ (sobrescrever)</option>
+          </select>
+        </div>
+
+        <div class="bg-bgSidebar border border-borderCard rounded-xl p-3.5 space-y-1.5 text-xs">
+          <div class="flex justify-between">
+            <span class="text-slate-400">Leads na fila para consulta:</span>
+            <span id="bulk-enrich-queue-count" class="font-bold text-amber-400">0</span>
+          </div>
+          <p class="text-[11px] text-slate-400 leading-relaxed pt-1">
+            <i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i>
+            O sistema intercala automaticamente entre <strong>3 provedores públicos</strong> com cadência controlada para evitar bloqueio (HTTP 429) e atualiza apenas o campo <strong>Razão Social</strong>.
+          </p>
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-borderCard flex justify-end gap-3">
+        <button onclick="closeModal('modal-bulk-enrich')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+        <button id="btn-start-bulk-enrich" onclick="startBackgroundEnrichment()"
+          class="px-5 py-2 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-2">
+          <i class="fa-solid fa-play"></i> Iniciar em Background
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- ==================== MODAL IMPORTAÇÃO & REVISÃO INTELIGENTE ==================== -->
   <div id="modal-import" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
     <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col shadow-2xl">
@@ -363,7 +544,7 @@
         <button onclick="closeModal('modal-import')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
       </div>
 
-      <!-- ETAPA 1: UPLOAD E MAPEAMENTO VISUAL -->
+      <!-- ETAPA 1 -->
       <div id="import-step-1" class="p-5 overflow-y-auto space-y-5 flex-1">
         <div class="flex flex-wrap items-center gap-4">
           <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" onchange="handleFileSelect(event)"
@@ -386,20 +567,15 @@
         </div>
       </div>
 
-      <!-- ETAPA 2: TELA DE REVISÃO, CRUZAMENTO E AJUSTES -->
+      <!-- ETAPA 2 -->
       <div id="import-step-2" class="hidden p-5 overflow-y-auto space-y-4 flex-1">
-        <!-- Cards Resumo do Cruzamento -->
         <div id="review-summary-cards" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
-
-        <!-- Abas de Revisão -->
         <div class="flex items-center justify-between border-b border-borderCard pb-2 flex-wrap gap-2">
           <div class="flex gap-2" id="review-tabs-bar"></div>
           <div class="text-[11px] text-slate-400">
-            <i class="fa-solid fa-pen-to-square text-sky-400 mr-1"></i> Você pode editar qualquer campo diretamente na tabela abaixo antes de confirmar.
+            <i class="fa-solid fa-pen-to-square text-sky-400 mr-1"></i> Edite qualquer campo na tabela abaixo antes de confirmar.
           </div>
         </div>
-
-        <!-- Tabela Editável de Revisão -->
         <div class="overflow-x-auto border border-borderCard rounded-xl max-h-[48vh]">
           <table class="w-full text-left text-xs border-collapse" id="review-table"></table>
         </div>
@@ -441,9 +617,9 @@
             <div class="flex gap-2">
               <input type="text" id="lead-cnpj" placeholder="00.000.000/0001-00"
                 class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
-              <button type="button" onclick="consultarCNPJParaLead()" title="Consultar BrasilAPI / ReceitaWS"
-                class="px-3 py-2 bg-brandBlue hover:bg-brandBlueHover text-white rounded-lg text-xs font-semibold shrink-0">
-                <i class="fa-solid fa-magnifying-glass"></i>
+              <button type="button" id="btn-modal-lead-cnpj" onclick="consultarRazaoSocialNoModalLead()" title="Buscar Razão Social pelo CNPJ"
+                class="px-3 py-2 bg-brandBlue hover:bg-brandBlueHover text-white rounded-lg text-xs font-semibold shrink-0 flex items-center gap-1">
+                <i class="fa-solid fa-magnifying-glass"></i> Razão
               </button>
             </div>
           </div>
