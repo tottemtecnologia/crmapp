@@ -9,7 +9,7 @@ const SUPABASE_KEY = SUPABASE_ANON_KEY;
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, x-api-key'
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, X-API-Key'
 };
 
 function jsonResponse(data, status = 200) {
@@ -48,23 +48,64 @@ function getPhoneVariants(rawPhone) {
   return Array.from(variants);
 }
 
+// Garante que a URL base sempre termine com /api (padrão do WA-AKG)
+function normalizeWaBaseUrl(rawBase) {
+  let base = (rawBase || 'https://wa.tottemtecnologia.com.br/api').trim().replace(/\/+$/, '');
+  base = base.replace(/\/dashboard(\/chat)?$/i, '');
+  if (!base.endsWith('/api')) {
+    base += '/api';
+  }
+  return base;
+}
+
 function buildWaHeaders(waConfig) {
   const headers = { 'Content-Type': 'application/json' };
   if (waConfig?.apiKey) {
-    headers['Authorization'] = `Bearer ${waConfig.apiKey}`;
-    headers['x-api-key'] = waConfig.apiKey;
-    headers['apikey'] = waConfig.apiKey;
+    headers['X-API-Key'] = waConfig.apiKey.trim();
   }
   return headers;
 }
 
 function buildWaUrl(waConfig, pathTemplate, vars = {}) {
-  const baseUrl = (waConfig?.baseUrl || 'https://wa.tottemtecnologia.com.br').replace(/\/+$/, '');
-  let path = pathTemplate || '';
+  const baseUrl = normalizeWaBaseUrl(waConfig?.baseUrl);
+  let path = (pathTemplate || '').trim();
+  if (path.startsWith('/api/')) path = path.slice(4);
   for (const [key, val] of Object.entries(vars)) {
     path = path.replaceAll(`{${key}}`, encodeURIComponent(String(val || '')));
   }
   return path.startsWith('http') ? path : `${baseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
+}
+
+// Resolve o sessionId automaticamente via GET /api/sessions se não for informado
+async function resolveSessionId(waConfig) {
+  const configured = (waConfig?.instance || '').trim();
+  if (configured && configured.toLowerCase() !== 'default') {
+    return { sessionId: configured };
+  }
+
+  const sessionsUrl = buildWaUrl(waConfig, '/sessions');
+  const res = await fetch(sessionsUrl, {
+    method: 'GET',
+    headers: buildWaHeaders(waConfig)
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    return { error: `HTTP ${res.status} ao buscar sessões em ${sessionsUrl}: ${errText.slice(0, 120)}` };
+  }
+
+  const sessions = await res.json();
+  const list = Array.isArray(sessions) ? sessions : sessions?.data || [];
+  if (list.length === 0) {
+    return { error: 'Nenhuma sessão encontrada no WA-AKG. Crie e conecte uma sessão primeiro.' };
+  }
+
+  const connected = list.find(s => String(s.status).toLowerCase() === 'connected') || list[0];
+  return {
+    sessionId: connected.sessionId || connected.id,
+    sessionObj: connected,
+    allSessions: list
+  };
 }
 
 async function supabaseFetch(path, options = {}) {
@@ -86,8 +127,8 @@ async function supabaseFetch(path, options = {}) {
   }
 }
 
-// Verifica se houve envio nos últimos 15 dias no Supabase OU no chat real do WA-AKG (GET /chat/{sessionId}/{jid})
-async function checkRecent15Days({ phone, waConfig }) {
+// Verifica regra de 15 dias no Supabase + GET /api/chat/{sessionId}/{jid}
+async function checkRecent15Days({ phone, waConfig, resolvedSessionId }) {
   const variants = getPhoneVariants(phone);
   if (variants.length === 0) return { recent: false };
 
@@ -126,17 +167,18 @@ async function checkRecent15Days({ phone, waConfig }) {
     }
   }
 
-  // 3. Checagem direta no histórico da conversa do WA-AKG: GET /chat/{sessionId}/{jid}
-  if (waConfig?.baseUrl && waConfig?.instance) {
-    const historyTemplate = waConfig.historyEndpoint || '/chat/{sessionId}/{jid}';
+  // 3. Checagem no histórico real do chat WA-AKG: GET /api/chat/{sessionId}/{jid}
+  const sessionId = resolvedSessionId || waConfig?.instance;
+  if (sessionId && sessionId !== 'default') {
+    const historyTemplate = waConfig?.historyEndpoint || '/chat/{sessionId}/{jid}';
     const headers = buildWaHeaders(waConfig);
     const cutoffTs = Date.now() - 15 * 24 * 60 * 60 * 1000;
 
     for (const variantPhone of variants) {
       try {
         const url = buildWaUrl(waConfig, historyTemplate, {
-          sessionId: waConfig.instance,
-          instance: waConfig.instance,
+          sessionId,
+          instance: sessionId,
           jid: toJid(variantPhone),
           phone: variantPhone
         });
@@ -146,12 +188,12 @@ async function checkRecent15Days({ phone, waConfig }) {
           const payload = await waRes.json();
           const messages = Array.isArray(payload)
             ? payload
-            : payload?.messages || payload?.data || payload?.records || payload?.chat?.messages || [];
+            : payload?.messages || payload?.data || payload?.records || [];
 
           const foundRecent = messages.find(m => {
-            const fromMe = m.fromMe === true || m.key?.fromMe === true || m.from_me === true || m.direction === 'outbound';
+            const fromMe = m.fromMe === true || m.key?.fromMe === true;
             if (!fromMe) return false;
-            const rawTs = m.messageTimestamp || m.timestamp || m.created_at || m.createdAt || m.t;
+            const rawTs = m.timestamp || m.messageTimestamp || m.createdAt || m.created_at;
             if (!rawTs) return false;
             const tsMs = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
             return !isNaN(tsMs) && tsMs >= cutoffTs;
@@ -184,16 +226,22 @@ export default {
 
       const action = pathname.replace('/api/wa/', '');
 
-      // 1. STATUS DA SESSÃO WA-AKG (GET /sessions/{sessionId} ou GET /sessions)
+      // 1. STATUS DA SESSÃO WA-AKG (GET /api/sessions ou GET /api/sessions/{id})
       if (action === 'status' && request.method === 'POST') {
         try {
           const body = await request.json();
-          const headers = buildWaHeaders(body);
-          const sessionId = (body.instance || '').trim();
-          const statusPath = sessionId ? `/sessions/${encodeURIComponent(sessionId)}` : '/sessions';
-          const targetUrl = buildWaUrl(body, statusPath);
+          const resolved = await resolveSessionId(body);
 
-          const res = await fetch(targetUrl, { method: 'GET', headers });
+          if (resolved.error) {
+            return jsonResponse({ online: false, error: resolved.error }, 200);
+          }
+
+          const targetUrl = buildWaUrl(body, `/sessions/${encodeURIComponent(resolved.sessionId)}`);
+          const res = await fetch(targetUrl, {
+            method: 'GET',
+            headers: buildWaHeaders(body)
+          });
+
           const text = await res.text();
           let data = null;
           try { data = JSON.parse(text); } catch { data = text; }
@@ -201,9 +249,10 @@ export default {
           return jsonResponse({
             online: res.ok,
             httpStatus: res.status,
+            detectedSessionId: resolved.sessionId,
+            sessionStatus: data?.status || resolved.sessionObj?.status || 'Unknown',
             url: targetUrl,
-            sessionInfo: data,
-            error: res.ok ? null : `HTTP ${res.status} (${typeof data === 'string' ? data.slice(0, 80) : data?.detail || data?.message || 'Verifique Session ID e API Key'})`
+            error: res.ok ? null : `HTTP ${res.status}: ${data?.message || data?.error || String(text).slice(0, 100)}`
           });
         } catch (err) {
           return jsonResponse({ online: false, error: err.message }, 200);
@@ -214,9 +263,11 @@ export default {
       if (action === 'check-15d' && request.method === 'POST') {
         try {
           const body = await request.json();
+          const resolved = await resolveSessionId(body.waConfig || {});
           const result = await checkRecent15Days({
             phone: body.phone,
-            waConfig: body.waConfig
+            waConfig: body.waConfig,
+            resolvedSessionId: resolved.sessionId
           });
           return jsonResponse(result);
         } catch (err) {
@@ -224,7 +275,7 @@ export default {
         }
       }
 
-      // 3. ENVIO DE MENSAGEM VIA WA-AKG: POST /messages/{sessionId}/{jid}/send
+      // 3. ENVIO DE MENSAGEM VIA WA-AKG: POST /api/messages/{sessionId}/{jid}/send
       if (action === 'send' && request.method === 'POST') {
         try {
           const body = await request.json();
@@ -234,16 +285,19 @@ export default {
             return jsonResponse({ success: false, error: 'Telefone e mensagem são obrigatórios.' }, 400);
           }
 
-          if (!waConfig?.instance) {
-            return jsonResponse({
-              success: false,
-              error: 'Configure o ID da Sessão (sessionId) em "Configurar Endpoints & Webhook".'
-            }, 400);
+          const resolved = await resolveSessionId(waConfig || {});
+          if (resolved.error) {
+            return jsonResponse({ success: false, status: 'erro', error: resolved.error }, 200);
           }
+          const sessionId = resolved.sessionId;
 
-          // Etapa A: Validação de 15 dias (CRM + Histórico de Chat WA-AKG)
+          // Etapa A: Validação de 15 dias (CRM + GET /api/chat/{sessionId}/{jid})
           if (check15Days) {
-            const check = await checkRecent15Days({ phone, waConfig });
+            const check = await checkRecent15Days({
+              phone,
+              waConfig,
+              resolvedSessionId: sessionId
+            });
             if (check.recent) {
               return jsonResponse({
                 success: false,
@@ -257,36 +311,38 @@ export default {
           const cleanPhone = onlyDigits(phone);
           const jid = toJid(cleanPhone);
 
-          // Etapa B: Simulação de digitação (POST /chat/{sessionId}/{jid}/presence)
+          // Etapa B: Simulação de digitação: POST /api/chat/{sessionId}/{jid}/presence
           if (waConfig?.simulateTyping !== false) {
             try {
               const presenceUrl = buildWaUrl(waConfig, '/chat/{sessionId}/{jid}/presence', {
-                sessionId: waConfig.instance,
+                sessionId,
                 jid
               });
               await fetch(presenceUrl, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ presence: 'composing', state: 'composing', typing: true })
+                body: JSON.stringify({ presence: 'composing' })
               });
               await new Promise(r => setTimeout(r, 1200));
             } catch {}
           }
 
-          // Etapa C: Disparo real (POST /messages/{sessionId}/{jid}/send)
+          // Etapa C: Disparo exato conforme schema do Swagger:
+          // POST /api/messages/{sessionId}/{jid}/send
+          // Body: { "jid": "5562...@s.whatsapp.net", "message": { "text": "..." } }
           const sendTemplate = waConfig?.sendEndpoint || '/messages/{sessionId}/{jid}/send';
           const targetUrl = buildWaUrl(waConfig, sendTemplate, {
-            sessionId: waConfig.instance,
-            instance: waConfig.instance,
+            sessionId,
+            instance: sessionId,
             jid,
             phone: cleanPhone
           });
 
           const outgoingPayload = {
-            text: message,
-            message: message,
-            content: message,
-            type: 'text'
+            jid: jid,
+            message: {
+              text: message
+            }
           };
 
           const waRes = await fetch(targetUrl, {
@@ -305,9 +361,8 @@ export default {
 
           const isSuccess =
             waRes.ok &&
-            parsedResp?.success !== false &&
-            parsedResp?.error === undefined &&
-            parsedResp?.status !== 'ERROR';
+            parsedResp?.status !== false &&
+            parsedResp?.success !== false;
 
           const nowIso = new Date().toISOString();
 
@@ -327,7 +382,7 @@ export default {
                 body: JSON.stringify({
                   lead_id: leadId,
                   tipo: 'disparo_wa',
-                  descricao: `Mensagem enviada via WA-AKG (Sessão ${waConfig.instance}):\n"${message}"`
+                  descricao: `Mensagem enviada via WA-AKG (Sessão ${sessionId}):\n"${message}"`
                 })
               });
             }
@@ -335,12 +390,14 @@ export default {
             return jsonResponse({
               success: true,
               status: 'enviado',
+              sessionIdUsed: sessionId,
               providerResponse: parsedResp
             });
           } else {
-            const detailMsg = Array.isArray(parsedResp?.detail)
-              ? parsedResp.detail.map(d => `${d.loc?.join('.')}: ${d.msg}`).join(' | ')
-              : parsedResp?.detail || parsedResp?.message || parsedResp?.error || rawResponseText;
+            const detailMsg =
+              parsedResp?.message ||
+              parsedResp?.error ||
+              rawResponseText;
 
             const errorMsg = `HTTP ${waRes.status}: ${String(detailMsg || 'Erro desconhecido').slice(0, 220)}`;
 
@@ -369,24 +426,28 @@ export default {
         }
       }
 
-      // 4. WEBHOOK RECEPTOR DO WA-AKG
+      // 4. WEBHOOK RECEPTOR DO WA-AKG (Eventos: message.sent, message.status, etc.)
       if (action === 'webhook' && request.method === 'POST') {
         try {
           const event = await request.json();
           const rawPhone =
+            event?.jid ||
+            event?.data?.jid ||
+            event?.data?.key?.remoteJid ||
             event?.phone ||
             event?.number ||
-            event?.jid ||
-            event?.remoteJid ||
-            event?.data?.key?.remoteJid ||
-            event?.from ||
             '';
 
           const variants = getPhoneVariants(rawPhone);
           if (variants.length > 0) {
-            const statusRaw = String(event?.status || event?.event || '').toLowerCase();
-            const isFailed = statusRaw.includes('fail') || statusRaw.includes('error') || statusRaw.includes('invalid');
-            const isDelivered = statusRaw.includes('sent') || statusRaw.includes('deliver') || statusRaw.includes('read') || statusRaw.includes('ack');
+            const evName = String(event?.event || event?.status || '').toLowerCase();
+            const isFailed = evName.includes('fail') || evName.includes('error') || evName.includes('invalid');
+            const isDelivered =
+              evName === 'message.sent' ||
+              evName === 'message.status' ||
+              evName.includes('sent') ||
+              evName.includes('deliver') ||
+              evName.includes('read');
 
             if (isFailed || isDelivered) {
               const inFilter = `(${variants.join(',')})`;
@@ -394,7 +455,7 @@ export default {
                 method: 'PATCH',
                 body: JSON.stringify({
                   status: isFailed ? 'erro' : 'enviado',
-                  motivo_erro: isFailed ? (event?.reason || event?.error || 'Falha reportada pelo webhook WA-AKG') : null,
+                  motivo_erro: isFailed ? (event?.error || event?.message || 'Falha reportada pelo webhook WA-AKG') : null,
                   ...(isDelivered ? { ultimo_disparo_em: new Date().toISOString() } : {})
                 })
               });
