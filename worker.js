@@ -9,7 +9,7 @@ const SUPABASE_KEY = SUPABASE_ANON_KEY;
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey'
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, x-api-key'
 };
 
 function jsonResponse(data, status = 200) {
@@ -24,6 +24,11 @@ function jsonResponse(data, status = 200) {
 
 function onlyDigits(str) {
   return String(str || '').replace(/\D/g, '');
+}
+
+function toJid(rawPhone) {
+  const clean = onlyDigits(rawPhone);
+  return clean.includes('@') ? clean : `${clean}@s.whatsapp.net`;
 }
 
 function getPhoneVariants(rawPhone) {
@@ -41,6 +46,25 @@ function getPhoneVariants(rawPhone) {
     }
   }
   return Array.from(variants);
+}
+
+function buildWaHeaders(waConfig) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (waConfig?.apiKey) {
+    headers['Authorization'] = `Bearer ${waConfig.apiKey}`;
+    headers['x-api-key'] = waConfig.apiKey;
+    headers['apikey'] = waConfig.apiKey;
+  }
+  return headers;
+}
+
+function buildWaUrl(waConfig, pathTemplate, vars = {}) {
+  const baseUrl = (waConfig?.baseUrl || 'https://wa.tottemtecnologia.com.br').replace(/\/+$/, '');
+  let path = pathTemplate || '';
+  for (const [key, val] of Object.entries(vars)) {
+    path = path.replaceAll(`{${key}}`, encodeURIComponent(String(val || '')));
+  }
+  return path.startsWith('http') ? path : `${baseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
 }
 
 async function supabaseFetch(path, options = {}) {
@@ -62,6 +86,7 @@ async function supabaseFetch(path, options = {}) {
   }
 }
 
+// Verifica se houve envio nos últimos 15 dias no Supabase OU no chat real do WA-AKG (GET /chat/{sessionId}/{jid})
 async function checkRecent15Days({ phone, waConfig }) {
   const variants = getPhoneVariants(phone);
   if (variants.length === 0) return { recent: false };
@@ -101,47 +126,47 @@ async function checkRecent15Days({ phone, waConfig }) {
     }
   }
 
-  // 3. Checagem opcional na API do WA-AKG
-  if (waConfig?.baseUrl && waConfig?.historyEndpoint) {
-    try {
-      const cleanBase = waConfig.baseUrl.replace(/\/+$/, '');
-      const cleanPath = waConfig.historyEndpoint
-        .replace('{phone}', variants[0])
-        .replace('{instance}', waConfig.instance || '');
-      const url = cleanPath.startsWith('http') ? cleanPath : `${cleanBase}${cleanPath.startsWith('/') ? '' : '/'}${cleanPath}`;
+  // 3. Checagem direta no histórico da conversa do WA-AKG: GET /chat/{sessionId}/{jid}
+  if (waConfig?.baseUrl && waConfig?.instance) {
+    const historyTemplate = waConfig.historyEndpoint || '/chat/{sessionId}/{jid}';
+    const headers = buildWaHeaders(waConfig);
+    const cutoffTs = Date.now() - 15 * 24 * 60 * 60 * 1000;
 
-      const headers = { 'Content-Type': 'application/json' };
-      if (waConfig.apiKey) {
-        headers['Authorization'] = `Bearer ${waConfig.apiKey}`;
-        headers['apikey'] = waConfig.apiKey;
-      }
-
-      const waRes = await fetch(url, { method: 'GET', headers });
-      if (waRes.ok) {
-        const payload = await waRes.json();
-        const messages = Array.isArray(payload)
-          ? payload
-          : payload?.messages || payload?.data || payload?.records || [];
-
-        const cutoffTs = Date.now() - 15 * 24 * 60 * 60 * 1000;
-        const foundRecent = messages.find(m => {
-          const fromMe = m.fromMe === true || m.key?.fromMe === true || m.direction === 'outbound' || m.type === 'out';
-          if (!fromMe) return false;
-          const rawTs = m.messageTimestamp || m.timestamp || m.created_at || m.createdAt;
-          if (!rawTs) return false;
-          const tsMs = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
-          return !isNaN(tsMs) && tsMs >= cutoffTs;
+    for (const variantPhone of variants) {
+      try {
+        const url = buildWaUrl(waConfig, historyTemplate, {
+          sessionId: waConfig.instance,
+          instance: waConfig.instance,
+          jid: toJid(variantPhone),
+          phone: variantPhone
         });
 
-        if (foundRecent) {
-          return {
-            recent: true,
-            source: 'Conversa WA-AKG (Últimos 15 dias)',
-            date: new Date().toISOString()
-          };
+        const waRes = await fetch(url, { method: 'GET', headers });
+        if (waRes.ok) {
+          const payload = await waRes.json();
+          const messages = Array.isArray(payload)
+            ? payload
+            : payload?.messages || payload?.data || payload?.records || payload?.chat?.messages || [];
+
+          const foundRecent = messages.find(m => {
+            const fromMe = m.fromMe === true || m.key?.fromMe === true || m.from_me === true || m.direction === 'outbound';
+            if (!fromMe) return false;
+            const rawTs = m.messageTimestamp || m.timestamp || m.created_at || m.createdAt || m.t;
+            if (!rawTs) return false;
+            const tsMs = typeof rawTs === 'number' ? (rawTs < 1e12 ? rawTs * 1000 : rawTs) : Date.parse(rawTs);
+            return !isNaN(tsMs) && tsMs >= cutoffTs;
+          });
+
+          if (foundRecent) {
+            return {
+              recent: true,
+              source: 'Conversa WA-AKG (Últimos 15 dias)',
+              date: new Date().toISOString()
+            };
+          }
         }
-      }
-    } catch {}
+      } catch {}
+    }
   }
 
   return { recent: false };
@@ -152,7 +177,6 @@ export default {
     const url = new URL(request.url);
     const pathname = url.pathname;
 
-    // Intercepta todas as rotas de API /api/wa/*
     if (pathname.startsWith('/api/wa/')) {
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -160,25 +184,26 @@ export default {
 
       const action = pathname.replace('/api/wa/', '');
 
-      // 1. STATUS DO WA-AKG
+      // 1. STATUS DA SESSÃO WA-AKG (GET /sessions/{sessionId} ou GET /sessions)
       if (action === 'status' && request.method === 'POST') {
         try {
           const body = await request.json();
-          const baseUrl = (body.baseUrl || 'https://wa.tottemtecnologia.com.br').replace(/\/+$/, '');
-          const statusPath = (body.statusEndpoint || '/').replace('{instance}', body.instance || '');
-          const targetUrl = statusPath.startsWith('http') ? statusPath : `${baseUrl}${statusPath.startsWith('/') ? '' : '/'}${statusPath}`;
-
-          const headers = { 'Content-Type': 'application/json' };
-          if (body.apiKey) {
-            headers['Authorization'] = `Bearer ${body.apiKey}`;
-            headers['apikey'] = body.apiKey;
-          }
+          const headers = buildWaHeaders(body);
+          const sessionId = (body.instance || '').trim();
+          const statusPath = sessionId ? `/sessions/${encodeURIComponent(sessionId)}` : '/sessions';
+          const targetUrl = buildWaUrl(body, statusPath);
 
           const res = await fetch(targetUrl, { method: 'GET', headers });
+          const text = await res.text();
+          let data = null;
+          try { data = JSON.parse(text); } catch { data = text; }
+
           return jsonResponse({
-            online: res.status < 500,
+            online: res.ok,
             httpStatus: res.status,
-            url: targetUrl
+            url: targetUrl,
+            sessionInfo: data,
+            error: res.ok ? null : `HTTP ${res.status} (${typeof data === 'string' ? data.slice(0, 80) : data?.detail || data?.message || 'Verifique Session ID e API Key'})`
           });
         } catch (err) {
           return jsonResponse({ online: false, error: err.message }, 200);
@@ -199,7 +224,7 @@ export default {
         }
       }
 
-      // 3. ENVIO DE MENSAGEM VIA WA-AKG + ATUALIZAÇÃO NO SUPABASE
+      // 3. ENVIO DE MENSAGEM VIA WA-AKG: POST /messages/{sessionId}/{jid}/send
       if (action === 'send' && request.method === 'POST') {
         try {
           const body = await request.json();
@@ -209,6 +234,14 @@ export default {
             return jsonResponse({ success: false, error: 'Telefone e mensagem são obrigatórios.' }, 400);
           }
 
+          if (!waConfig?.instance) {
+            return jsonResponse({
+              success: false,
+              error: 'Configure o ID da Sessão (sessionId) em "Configurar Endpoints & Webhook".'
+            }, 400);
+          }
+
+          // Etapa A: Validação de 15 dias (CRM + Histórico de Chat WA-AKG)
           if (check15Days) {
             const check = await checkRecent15Days({ phone, waConfig });
             if (check.recent) {
@@ -220,28 +253,40 @@ export default {
             }
           }
 
-          const baseUrl = (waConfig?.baseUrl || 'https://wa.tottemtecnologia.com.br').replace(/\/+$/, '');
-          const sendPath = (waConfig?.sendEndpoint || '/api/send-message').replace('{instance}', waConfig?.instance || '');
-          const targetUrl = sendPath.startsWith('http') ? sendPath : `${baseUrl}${sendPath.startsWith('/') ? '' : '/'}${sendPath}`;
+          const headers = buildWaHeaders(waConfig);
+          const cleanPhone = onlyDigits(phone);
+          const jid = toJid(cleanPhone);
 
-          const headers = { 'Content-Type': 'application/json' };
-          if (waConfig?.apiKey) {
-            headers['Authorization'] = `Bearer ${waConfig.apiKey}`;
-            headers['apikey'] = waConfig.apiKey;
+          // Etapa B: Simulação de digitação (POST /chat/{sessionId}/{jid}/presence)
+          if (waConfig?.simulateTyping !== false) {
+            try {
+              const presenceUrl = buildWaUrl(waConfig, '/chat/{sessionId}/{jid}/presence', {
+                sessionId: waConfig.instance,
+                jid
+              });
+              await fetch(presenceUrl, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ presence: 'composing', state: 'composing', typing: true })
+              });
+              await new Promise(r => setTimeout(r, 1200));
+            } catch {}
           }
 
-          const cleanPhone = onlyDigits(phone);
+          // Etapa C: Disparo real (POST /messages/{sessionId}/{jid}/send)
+          const sendTemplate = waConfig?.sendEndpoint || '/messages/{sessionId}/{jid}/send';
+          const targetUrl = buildWaUrl(waConfig, sendTemplate, {
+            sessionId: waConfig.instance,
+            instance: waConfig.instance,
+            jid,
+            phone: cleanPhone
+          });
 
           const outgoingPayload = {
-            phone: cleanPhone,
-            number: cleanPhone,
-            to: cleanPhone,
-            chatId: `${cleanPhone}@c.us`,
-            message: message,
             text: message,
-            textMessage: { text: message },
-            instance: waConfig?.instance || undefined,
-            simulateTyping: waConfig?.simulateTyping !== false
+            message: message,
+            content: message,
+            type: 'text'
           };
 
           const waRes = await fetch(targetUrl, {
@@ -282,7 +327,7 @@ export default {
                 body: JSON.stringify({
                   lead_id: leadId,
                   tipo: 'disparo_wa',
-                  descricao: `Mensagem enviada via WA-AKG:\n"${message}"`
+                  descricao: `Mensagem enviada via WA-AKG (Sessão ${waConfig.instance}):\n"${message}"`
                 })
               });
             }
@@ -293,18 +338,18 @@ export default {
               providerResponse: parsedResp
             });
           } else {
-            const errorMsg =
-              parsedResp?.detail ||
-              parsedResp?.message ||
-              parsedResp?.error ||
-              `HTTP ${waRes.status} ao comunicar com WA-AKG`;
+            const detailMsg = Array.isArray(parsedResp?.detail)
+              ? parsedResp.detail.map(d => `${d.loc?.join('.')}: ${d.msg}`).join(' | ')
+              : parsedResp?.detail || parsedResp?.message || parsedResp?.error || rawResponseText;
+
+            const errorMsg = `HTTP ${waRes.status}: ${String(detailMsg || 'Erro desconhecido').slice(0, 220)}`;
 
             if (leadId) {
               await supabaseFetch(`crm_leads?id=eq.${leadId}`, {
                 method: 'PATCH',
                 body: JSON.stringify({
                   status: 'erro',
-                  motivo_erro: String(errorMsg).slice(0, 250)
+                  motivo_erro: errorMsg
                 })
               });
             }
@@ -312,7 +357,7 @@ export default {
             return jsonResponse({
               success: false,
               status: 'erro',
-              error: String(errorMsg)
+              error: errorMsg
             });
           }
         } catch (err) {
@@ -331,6 +376,7 @@ export default {
           const rawPhone =
             event?.phone ||
             event?.number ||
+            event?.jid ||
             event?.remoteJid ||
             event?.data?.key?.remoteJid ||
             event?.from ||
@@ -364,7 +410,6 @@ export default {
       return jsonResponse({ error: 'Rota WA-AKG não encontrada.' }, 404);
     }
 
-    // Para qualquer outra rota, entrega o front-end (public/index.html e public/app.js)
     return env.ASSETS.fetch(request);
   }
 };
