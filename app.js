@@ -9,6 +9,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // Estado global
 let leadsData = [];
 let pessoasData = [];
+let waTemplatesData = [];
 let currentUser = null;
 let clientesViewMode = 'lista';
 let importMode = 'novo';
@@ -16,7 +17,7 @@ let parsedSheetRows = [];
 let parsedSheetHeaders = [];
 let activeTimelineTarget = { lead_id: null, pessoa_id: null };
 
-// Estado de paginação dos Leads
+// Paginação de Leads
 let leadsPagination = {
   currentPage: 1,
   pageSize: 50
@@ -30,7 +31,7 @@ let reviewState = {
   unmatchedNew: []
 };
 
-// Estado do trabalhador em background para enriquecimento de CNPJ (Load Balance)
+// Trabalhador em background para enriquecimento de CNPJ (Load Balance)
 let bgEnrichWorker = {
   running: false,
   paused: false,
@@ -42,10 +43,39 @@ let bgEnrichWorker = {
   providerIndex: 0
 };
 
+// Configuração e Estado do Disparador WA-AKG (via Cloudflare Worker)
+let waConfig = {
+  baseUrl: 'https://wa.tottemtecnologia.com.br',
+  sendEndpoint: '/api/send-message',
+  historyEndpoint: '/api/messages/{phone}',
+  statusEndpoint: '/api/status',
+  instance: 'default',
+  apiKey: ''
+};
+
+let waRunner = {
+  running: false,
+  paused: false,
+  stopped: false,
+  queue: [],
+  processed: 0,
+  sent: 0,
+  skipped15d: 0,
+  errors: 0,
+  selectedTemplateId: ''
+};
+
 // ============================================================================
 // INICIALIZAÇÃO E AUTENTICAÇÃO
 // ============================================================================
 document.addEventListener('DOMContentLoaded', () => {
+  const savedWaCfg = localStorage.getItem('tottem_wa_akg_config');
+  if (savedWaCfg) {
+    try {
+      waConfig = { ...waConfig, ...JSON.parse(savedWaCfg) };
+    } catch {}
+  }
+
   const saved = localStorage.getItem('tottem_crm_user');
   if (saved) {
     currentUser = JSON.parse(saved);
@@ -100,7 +130,7 @@ async function refreshAll() {
     syncBadge.innerHTML = '<i class="fa-solid fa-spinner fa-spin text-sky-400"></i> Sincronizando...';
   }
 
-  await Promise.all([loadLeads(), loadPessoas()]);
+  await Promise.all([loadLeads(), loadPessoas(), loadWaTemplates()]);
 
   if (syncBadge) {
     syncBadge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Conectado ao Supabase';
@@ -110,6 +140,9 @@ async function refreshAll() {
   renderDashboard();
   renderLeadsTable();
   renderClientes();
+  if (!waRunner.running) {
+    buildWaQueue();
+  }
 }
 
 // ============================================================================
@@ -177,7 +210,19 @@ async function loadPessoas() {
   document.getElementById('badge-clientes').textContent = pessoasData.length;
 }
 
-// Popula os filtros de TAG na aba Leads e no modal de Exportação
+async function loadWaTemplates() {
+  const { data, error } = await sb
+    .from('crm_templates_mensagem')
+    .select('*')
+    .order('criado_em', { ascending: false });
+
+  if (!error && data) {
+    waTemplatesData = data;
+    renderWaTemplatesDropdown();
+  }
+}
+
+// Popula os filtros de TAG na aba Leads, Exportação e Disparador WA-AKG
 function populateTagsDropdowns() {
   const uniqueTags = Array.from(
     new Set(
@@ -189,8 +234,10 @@ function populateTagsDropdowns() {
 
   const filterSelect = document.getElementById('lead-filter-tag');
   const exportSelect = document.getElementById('exp-tag-filter');
+  const waTagSelect = document.getElementById('wa-filter-tag');
 
   const currentFilterVal = filterSelect ? filterSelect.value : 'todas';
+  const currentWaTagVal = waTagSelect ? waTagSelect.value : 'todas';
 
   if (filterSelect) {
     filterSelect.innerHTML =
@@ -204,6 +251,13 @@ function populateTagsDropdowns() {
     exportSelect.innerHTML =
       `<option value="">Todas as TAGs</option>` +
       uniqueTags.map(t => `<option value="${t}">${t}</option>`).join('');
+  }
+
+  if (waTagSelect) {
+    waTagSelect.innerHTML =
+      `<option value="todas">Todas as TAGs (${leadsData.length} leads)</option>` +
+      uniqueTags.map(t => `<option value="${t}">${t}</option>`).join('');
+    waTagSelect.value = uniqueTags.includes(currentWaTagVal) ? currentWaTagVal : 'todas';
   }
 }
 
@@ -223,10 +277,16 @@ function switchTab(tabName) {
 
   const titles = {
     dashboard: 'Dashboard Geral',
-    leads: 'Gestão de Leads & Disparos WhatsApp',
+    leads: 'Base de Leads & Importação',
+    disparador: 'Disparador WhatsApp em Massa (WA-AKG)',
     clientes: 'Clientes & Funil de Conversão'
   };
   document.getElementById('page-title').textContent = titles[tabName];
+
+  if (tabName === 'disparador' && !waRunner.running) {
+    buildWaQueue();
+    updateWaLivePreview();
+  }
 }
 
 // ============================================================================
@@ -363,6 +423,430 @@ function parseDisparoStatus(rawStatus) {
   return 'nao_enviado';
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================================================
+// DISPARADOR WA-AKG (CONFIGURAÇÃO, TEMPLATES, VARIÁVEIS E MOTOR ANTI-BAN)
+// ============================================================================
+function openWaConfigModal() {
+  document.getElementById('cfg-wa-base-url').value = waConfig.baseUrl || 'https://wa.tottemtecnologia.com.br';
+  document.getElementById('cfg-wa-send-endpoint').value = waConfig.sendEndpoint || '/api/send-message';
+  document.getElementById('cfg-wa-history-endpoint').value = waConfig.historyEndpoint || '/api/messages/{phone}';
+  document.getElementById('cfg-wa-instance').value = waConfig.instance || 'default';
+  document.getElementById('cfg-wa-apikey').value = waConfig.apiKey || '';
+  document.getElementById('cfg-wa-webhook-url').textContent = `${window.location.origin}/api/wa/webhook`;
+  openModal('modal-wa-config');
+}
+
+function saveWaConfig(e) {
+  e.preventDefault();
+  waConfig.baseUrl = document.getElementById('cfg-wa-base-url').value.trim();
+  waConfig.sendEndpoint = document.getElementById('cfg-wa-send-endpoint').value.trim();
+  waConfig.historyEndpoint = document.getElementById('cfg-wa-history-endpoint').value.trim();
+  waConfig.instance = document.getElementById('cfg-wa-instance').value.trim();
+  waConfig.apiKey = document.getElementById('cfg-wa-apikey').value.trim();
+
+  localStorage.setItem('tottem_wa_akg_config', JSON.stringify(waConfig));
+  closeModal('modal-wa-config');
+  alert('Configurações de integração WA-AKG salvas com sucesso!');
+}
+
+async function testWaConnection() {
+  const btn = document.getElementById('btn-test-wa-conn');
+  const badge = document.getElementById('wa-conn-badge');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Testando...';
+
+  try {
+    const res = await fetch('/api/wa/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(waConfig)
+    });
+    const data = await res.json();
+
+    if (data.online) {
+      badge.className = 'text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-300 border border-emerald-500/40';
+      badge.innerHTML = `<i class="fa-solid fa-circle text-[8px] mr-1 text-emerald-400"></i> WA-AKG Online (HTTP ${data.httpStatus})`;
+    } else {
+      badge.className = 'text-[11px] px-2.5 py-0.5 rounded-full bg-rose-950 text-rose-300 border border-rose-500/40';
+      badge.innerHTML = `<i class="fa-solid fa-circle-xmark mr-1"></i> Falha de Conexão (${data.error || 'Offline'})`;
+    }
+  } catch (err) {
+    badge.className = 'text-[11px] px-2.5 py-0.5 rounded-full bg-rose-950 text-rose-300 border border-rose-500/40';
+    badge.textContent = 'Worker Cloudflare inacessível (rode via Cloudflare Pages)';
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-plug-circle-check"></i> Testar Conexão';
+  }
+}
+
+// CRUD de Templates de Mensagem
+function renderWaTemplatesDropdown() {
+  const select = document.getElementById('wa-template-select');
+  if (!select) return;
+
+  select.innerHTML =
+    `<option value="">-- Selecione um modelo salvo (${waTemplatesData.length}) --</option>` +
+    waTemplatesData.map(t => `<option value="${t.id}">${t.titulo}</option>`).join('');
+
+  if (waRunner.selectedTemplateId && waTemplatesData.some(t => t.id === waRunner.selectedTemplateId)) {
+    select.value = waRunner.selectedTemplateId;
+  } else if (waTemplatesData.length > 0 && !document.getElementById('wa-template-content').value) {
+    select.value = waTemplatesData[0].id;
+    selectWaTemplate(waTemplatesData[0].id);
+  }
+}
+
+function selectWaTemplate(id) {
+  waRunner.selectedTemplateId = id;
+  if (!id) {
+    newWaTemplate();
+    return;
+  }
+  const tpl = waTemplatesData.find(t => t.id === id);
+  if (!tpl) return;
+
+  document.getElementById('wa-template-title').value = tpl.titulo;
+  document.getElementById('wa-template-content').value = tpl.conteudo;
+  updateWaLivePreview();
+}
+
+function newWaTemplate() {
+  waRunner.selectedTemplateId = '';
+  document.getElementById('wa-template-select').value = '';
+  document.getElementById('wa-template-title').value = '';
+  document.getElementById('wa-template-content').value = '';
+  updateWaLivePreview();
+}
+
+async function saveWaTemplate() {
+  const titulo = document.getElementById('wa-template-title').value.trim();
+  const conteudo = document.getElementById('wa-template-content').value.trim();
+
+  if (!titulo || !conteudo) {
+    return alert('Preencha o Título e o Conteúdo da mensagem antes de salvar.');
+  }
+
+  if (waRunner.selectedTemplateId) {
+    const { error } = await sb
+      .from('crm_templates_mensagem')
+      .update({ titulo, conteudo, atualizado_em: new Date().toISOString() })
+      .eq('id', waRunner.selectedTemplateId);
+
+    if (error) return alert('Erro ao atualizar modelo: ' + error.message);
+  } else {
+    const { data, error } = await sb
+      .from('crm_templates_mensagem')
+      .insert([{ titulo, conteudo }])
+      .select('id')
+      .single();
+
+    if (error) return alert('Erro ao salvar modelo: ' + error.message);
+    waRunner.selectedTemplateId = data.id;
+  }
+
+  await loadWaTemplates();
+  alert('Modelo de mensagem salvo com sucesso!');
+}
+
+async function deleteWaTemplate() {
+  if (!waRunner.selectedTemplateId) {
+    return alert('Selecione um modelo salvo para excluir.');
+  }
+  if (!confirm('Deseja excluir este modelo de mensagem?')) return;
+
+  await sb.from('crm_templates_mensagem').delete().eq('id', waRunner.selectedTemplateId);
+  newWaTemplate();
+  await loadWaTemplates();
+}
+
+function insertWaVariable(variableTag) {
+  const textarea = document.getElementById('wa-template-content');
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const text = textarea.value;
+  textarea.value = text.substring(0, start) + variableTag + text.substring(end);
+  textarea.selectionStart = textarea.selectionEnd = start + variableTag.length;
+  textarea.focus();
+  updateWaLivePreview();
+}
+
+function renderWaMessageText(template, lead) {
+  const nome = (lead?.nome_contato || lead?.razao_social || 'Parceiro(a)').trim();
+  const razao = (lead?.razao_social || lead?.nome_contato || 'sua empresa').trim();
+  const cnpj = (lead?.cnpj || 'não informado').trim();
+
+  return String(template || '')
+    .replace(/\{\{\s*NOME\s*\}\}/gi, nome)
+    .replace(/\{\{\s*RAZAO_SOCIAL\s*\}\}/gi, razao)
+    .replace(/\{\{\s*CNPJ\s*\}\}/gi, cnpj);
+}
+
+function updateWaLivePreview() {
+  const rawContent = document.getElementById('wa-template-content')?.value || '';
+  const sampleLead = waRunner.queue[0]?.lead || leadsData[0] || {
+    nome_contato: 'João Silva',
+    razao_social: 'EXEMPLO LICITAÇÕES LTDA',
+    cnpj: '12.345.678/0001-99',
+    telefone: '5562999998888'
+  };
+
+  const rendered = rawContent.trim()
+    ? renderWaMessageText(rawContent, sampleLead)
+    : 'Selecione ou digite uma mensagem acima para visualizar como o cliente receberá no WhatsApp.';
+
+  document.getElementById('wa-preview-recipient').textContent = sampleLead.razao_social || sampleLead.nome_contato || 'Prévia do Próximo Lead';
+  document.getElementById('wa-preview-phone').textContent = sampleLead.telefone ? `+${onlyDigits(sampleLead.telefone)}` : 'online';
+  document.getElementById('wa-preview-bubble').textContent = rendered;
+  document.getElementById('wa-preview-time').textContent = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+// Monta a fila de disparo com base nos filtros e limite de lote
+function buildWaQueue() {
+  if (waRunner.running) return;
+
+  const tagFilter = document.getElementById('wa-filter-tag').value;
+  const statusFilter = document.getElementById('wa-filter-status').value;
+  const cupomFilter = document.getElementById('wa-filter-cupom').value.trim().toUpperCase();
+  const limit = Math.max(1, Number(document.getElementById('wa-batch-limit').value) || 50);
+  const ninthMode = document.getElementById('wa-ninth-digit').value;
+
+  const filtered = leadsData
+    .filter(l => {
+      if (!l.telefone) return false;
+      if (tagFilter !== 'todas' && (l.tag || '').toUpperCase() !== tagFilter) return false;
+      if (cupomFilter && (l.cupom || '').toUpperCase() !== cupomFilter) return false;
+
+      if (statusFilter === 'nao_enviado') return l.status === 'nao_enviado';
+      if (statusFilter === 'erro') return l.status === 'erro';
+      if (statusFilter === 'nao_enviado_e_erro') return l.status === 'nao_enviado' || l.status === 'erro';
+      return true;
+    })
+    .slice(0, limit);
+
+  waRunner.queue = filtered.map(lead => ({
+    lead,
+    formattedPhone: formatPhoneNinthDigit(lead.telefone, ninthMode),
+    state: 'pendente', // pendente | enviando | enviado | ignorado_15d | erro
+    detail: 'Na fila aguardando disparo'
+  }));
+
+  waRunner.processed = 0;
+  waRunner.sent = 0;
+  waRunner.skipped15d = 0;
+  waRunner.errors = 0;
+
+  updateWaRunnerKPIs();
+  renderWaQueueList();
+  updateWaLivePreview();
+}
+
+function updateWaRunnerKPIs() {
+  const total = waRunner.queue.length;
+  const pendentes = waRunner.queue.filter(i => i.state === 'pendente' || i.state === 'enviando').length;
+
+  document.getElementById('wa-kpi-total').textContent = total;
+  document.getElementById('wa-kpi-pendentes').textContent = pendentes;
+  document.getElementById('wa-kpi-enviados').textContent = waRunner.sent;
+  document.getElementById('wa-kpi-ignorados').textContent = waRunner.skipped15d;
+  document.getElementById('wa-kpi-erros').textContent = waRunner.errors;
+
+  const pct = total > 0 ? Math.round((waRunner.processed / total) * 100) : 0;
+  document.getElementById('wa-runner-progress').style.width = `${pct}%`;
+  document.getElementById('wa-runner-counter').textContent = `${waRunner.processed} / ${total} processados`;
+}
+
+function renderWaQueueList() {
+  const container = document.getElementById('wa-queue-list');
+  if (waRunner.queue.length === 0) {
+    container.innerHTML = `<div class="p-8 text-center text-xs text-slate-500">Nenhum lead encontrado para os filtros selecionados.</div>`;
+    return;
+  }
+
+  const stateBadges = {
+    pendente: '<span class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">Pendente</span>',
+    enviando: '<span class="px-2 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">Enviando...</span>',
+    enviado: '<span class="px-2 py-0.5 rounded text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-700/50"><i class="fa-solid fa-check-double mr-1"></i>Enviado</span>',
+    ignorado_15d: '<span class="px-2 py-0.5 rounded text-[10px] bg-purple-950 text-purple-300 border border-purple-700/50">Pulado (15d)</span>',
+    erro: '<span class="px-2 py-0.5 rounded text-[10px] bg-rose-950 text-rose-400 border border-rose-700/50">Erro</span>'
+  };
+
+  container.innerHTML = waRunner.queue.slice(0, 250).map(item => `
+    <div class="p-3 hover:bg-bgInput/40 transition flex items-start justify-between gap-2.5">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="font-bold text-xs text-white truncate">${item.lead.razao_social || item.lead.nome_contato || 'Sem Nome'}</span>
+        </div>
+        <div class="text-[11px] font-mono text-slate-400">${item.formattedPhone} ${item.lead.tag ? `• <span class="text-purple-300">${item.lead.tag}</span>` : ''}</div>
+        <div class="text-[11px] text-slate-400 truncate mt-0.5">${item.detail}</div>
+      </div>
+      <div class="shrink-0">${stateBadges[item.state]}</div>
+    </div>
+  `).join('');
+}
+
+async function countdownWait(seconds, labelPrefix) {
+  for (let s = seconds; s > 0; s--) {
+    if (waRunner.stopped) return;
+    while (waRunner.paused && !waRunner.stopped) {
+      document.getElementById('wa-runner-countdown').textContent = 'PAUSADO';
+      await sleep(400);
+    }
+    if (waRunner.stopped) return;
+    document.getElementById('wa-runner-countdown').textContent = `${labelPrefix}: ${s}s`;
+    await sleep(1000);
+  }
+  document.getElementById('wa-runner-countdown').textContent = '';
+}
+
+async function startWaCampaign() {
+  if (waRunner.running) return;
+
+  const templateText = document.getElementById('wa-template-content').value.trim();
+  if (!templateText) {
+    return alert('Digite ou selecione uma mensagem antes de iniciar o disparo.');
+  }
+
+  if (waRunner.queue.length === 0) {
+    buildWaQueue();
+    if (waRunner.queue.length === 0) {
+      return alert('A fila está vazia. Ajuste os filtros de TAG/Status.');
+    }
+  }
+
+  const delayMin = Math.max(2, Number(document.getElementById('wa-delay-min').value) || 15);
+  const delayMax = Math.max(delayMin, Number(document.getElementById('wa-delay-max').value) || 35);
+  const pauseEvery = Math.max(0, Number(document.getElementById('wa-pause-every').value) || 0);
+  const pauseMinutes = Math.max(1, Number(document.getElementById('wa-pause-minutes').value) || 5);
+  const check15Days = document.getElementById('wa-check-15d').checked;
+  const simulateTyping = document.getElementById('wa-simulate-typing').checked;
+
+  waRunner.running = true;
+  waRunner.paused = false;
+  waRunner.stopped = false;
+
+  document.getElementById('btn-wa-start').disabled = true;
+  document.getElementById('btn-wa-pause').disabled = false;
+  document.getElementById('btn-wa-stop').disabled = false;
+  document.getElementById('badge-wa-live').classList.remove('hidden');
+  document.getElementById('wa-runner-status-label').textContent = 'Disparando em andamento...';
+  document.getElementById('wa-runner-status-label').className = 'text-[11px] font-semibold text-emerald-400';
+
+  let sentInCurrentBatch = 0;
+
+  for (let i = 0; i < waRunner.queue.length; i++) {
+    if (waRunner.stopped) break;
+
+    while (waRunner.paused && !waRunner.stopped) {
+      document.getElementById('wa-runner-status-label').textContent = 'Campanha Pausada';
+      document.getElementById('wa-runner-status-label').className = 'text-[11px] font-semibold text-amber-400';
+      await sleep(500);
+    }
+    if (waRunner.stopped) break;
+
+    const item = waRunner.queue[i];
+    if (item.state !== 'pendente') continue;
+
+    document.getElementById('wa-runner-status-label').textContent = 'Disparando em andamento...';
+    document.getElementById('wa-runner-status-label').className = 'text-[11px] font-semibold text-emerald-400';
+
+    item.state = 'enviando';
+    item.detail = 'Verificando histórico e enviando via WA-AKG...';
+    renderWaQueueList();
+
+    const renderedMsg = renderWaMessageText(templateText, item.lead);
+
+    try {
+      const res = await fetch('/api/wa/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          leadId: item.lead.id,
+          phone: item.formattedPhone,
+          message: renderedMsg,
+          check15Days,
+          waConfig: { ...waConfig, simulateTyping }
+        })
+      });
+
+      const result = await res.json();
+      waRunner.processed++;
+
+      if (result.skipped15d) {
+        item.state = 'ignorado_15d';
+        item.detail = result.reason || 'Já recebeu mensagem nos últimos 15 dias';
+        waRunner.skipped15d++;
+      } else if (result.success) {
+        item.state = 'enviado';
+        item.detail = `Enviado às ${new Date().toLocaleTimeString('pt-BR')}`;
+        item.lead.status = 'enviado';
+        waRunner.sent++;
+        sentInCurrentBatch++;
+      } else {
+        item.state = 'erro';
+        item.detail = result.error || 'Falha no envio';
+        item.lead.status = 'erro';
+        item.lead.motivo_erro = item.detail;
+        waRunner.errors++;
+      }
+    } catch (err) {
+      waRunner.processed++;
+      item.state = 'erro';
+      item.detail = 'Erro ao chamar Worker Cloudflare: ' + err.message;
+      waRunner.errors++;
+    }
+
+    updateWaRunnerKPIs();
+    renderWaQueueList();
+
+    // Verifica se há próximo item pendente para aplicar anti-banimento
+    const hasNext = i < waRunner.queue.length - 1 && !waRunner.stopped;
+    if (hasNext) {
+      if (pauseEvery > 0 && sentInCurrentBatch >= pauseEvery) {
+        sentInCurrentBatch = 0;
+        await countdownWait(pauseMinutes * 60, 'Pausa anti-ban (lote)');
+      } else if (item.state !== 'ignorado_15d') {
+        const randomDelay = Math.floor(Math.random() * (delayMax - delayMin + 1)) + delayMin;
+        await countdownWait(randomDelay, 'Próximo envio em');
+      }
+    }
+  }
+
+  // Finalização da campanha e atualização do CRM
+  waRunner.running = false;
+  document.getElementById('btn-wa-start').disabled = false;
+  document.getElementById('btn-wa-pause').disabled = true;
+  document.getElementById('btn-wa-stop').disabled = true;
+  document.getElementById('badge-wa-live').classList.add('hidden');
+  document.getElementById('wa-runner-countdown').textContent = '';
+
+  document.getElementById('wa-runner-status-label').textContent = waRunner.stopped
+    ? 'Envio encerrado pelo usuário'
+    : 'Lote finalizado e CRM atualizado!';
+  document.getElementById('wa-runner-status-label').className = 'text-[11px] font-semibold text-sky-400';
+
+  await refreshAll();
+}
+
+function togglePauseWaCampaign() {
+  if (!waRunner.running) return;
+  waRunner.paused = !waRunner.paused;
+  const btn = document.getElementById('btn-wa-pause');
+  btn.innerHTML = waRunner.paused
+    ? '<i class="fa-solid fa-play"></i> Retomar'
+    : '<i class="fa-solid fa-pause"></i> Pausar';
+}
+
+function stopWaCampaign() {
+  if (!waRunner.running) return;
+  if (!confirm('Deseja realmente encerrar o disparo atual?')) return;
+  waRunner.stopped = true;
+  waRunner.paused = false;
+}
+
 // ============================================================================
 // LOAD BALANCE DE APIS DE CNPJ (BRASILAPI + MINHARECEITA + RECEITAWS)
 // ============================================================================
@@ -459,7 +943,7 @@ async function fetchCNPJLoadBalanced(rawCnpj, preferredStartIdx = null) {
       if (result && result.razao_social) {
         return result;
       }
-    } catch (err) {
+    } catch {
       console.warn(`[LoadBalance] ${provider.name} indisponível ou 429, alternando...`);
     }
   }
@@ -541,10 +1025,6 @@ function updateBulkEnrichCount() {
   const list = getFilteredLeadsForBulkEnrich();
   document.getElementById('bulk-enrich-queue-count').textContent = `${list.length} leads`;
   document.getElementById('btn-start-bulk-enrich').disabled = list.length === 0;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function startBackgroundEnrichment() {
@@ -1359,7 +1839,6 @@ function handleFileSelect(event) {
   const file = event.target.files[0];
   if (!file) return;
 
-  // Sugere automaticamente uma TAG limpa baseada no nome do arquivo caso o usuário ainda não tenha digitado
   const tagInput = document.getElementById('import-list-tag');
   if (!tagInput.value.trim()) {
     const cleanName = file.name
@@ -1845,7 +2324,6 @@ async function commitReviewedImport() {
     }
     alert(`${selected.length} novos leads importados com sucesso!`);
   } else {
-    // Atualiza APENAS o status (e motivo_erro) dos leads existentes, preservando a TAG original deles
     const toUpdate = reviewState.matchedUpdates.filter(r => r.include);
     const updateChunks = chunkArray(toUpdate, 25);
     for (const batch of updateChunks) {
@@ -1859,7 +2337,6 @@ async function commitReviewedImport() {
       );
     }
 
-    // Aplica a nova TAG somente nos contatos novos (não encontrados)
     const toInsertNew = reviewState.unmatchedNew
       .filter(r => r.include && r.telefone)
       .map(r => ({
@@ -1928,7 +2405,7 @@ async function loadTimelineNotes() {
         <span class="uppercase font-bold text-brandBlue">${item.tipo}</span>
         <span>${new Date(item.criado_em).toLocaleString('pt-BR')}</span>
       </div>
-      <p class="text-xs text-slate-200 leading-relaxed">${item.descricao}</p>
+      <p class="text-xs text-slate-200 leading-relaxed whitespace-pre-line">${item.descricao}</p>
     </div>
   `).join('');
 }
