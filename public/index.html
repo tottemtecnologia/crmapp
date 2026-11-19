@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TOTTEM CRM | Gestão de Leads & Disparador WA-AKG</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bgMain: '#090e1a',
+            bgSidebar: '#0d1424',
+            bgCard: '#11192c',
+            bgInput: '#162038',
+            borderCard: '#1e2b47',
+            brandBlue: '#2563eb',
+            brandBlueHover: '#1d4ed8'
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    body { background-color: #090e1a; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1424; }
+    ::-webkit-scrollbar-thumb { background: #1e2b47; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2563eb; }
+    .wa-chat-bg {
+      background-color: #0b141a;
+      background-image: radial-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 0);
+      background-size: 18px 18px;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- TELA DE LOGIN -->
+  <div id="login-screen" class="fixed inset-0 z-50 bg-bgMain flex items-center justify-center p-4">
+    <div class="w-full max-w-md bg-bgCard border border-borderCard rounded-2xl p-8 shadow-2xl">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-11 h-11 rounded-xl bg-brandBlue/20 border border-brandBlue/40 flex items-center justify-center text-brandBlue">
+          <i class="fa-solid fa-shield-halved text-xl"></i>
+        </div>
+        <div>
+          <h1 class="text-xl font-bold text-white tracking-wide">TOTTEM CRM</h1>
+          <p class="text-xs text-slate-400">Acesso Administrativo</p>
+        </div>
+      </div>
+      <form id="login-form" class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">E-mail</label>
+          <input type="email" id="login-email" required placeholder="admin@tottemtecnologia.com.br"
+            class="w-full bg-bgInput border border-borderCard rounded-lg px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-brandBlue" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1">Senha</label>
+          <input type="password" id="login-senha" required placeholder="••••••••"
+            class="w-full bg-bgInput border border-borderCard rounded-lg px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-brandBlue" />
+        </div>
+        <p id="login-error" class="text-xs text-rose-400 hidden"></p>
+        <button type="submit" class="w-full bg-brandBlue hover:bg-brandBlueHover text-white font-medium py-2.5 rounded-lg transition">
+          Entrar no CRM
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- APLICAÇÃO PRINCIPAL -->
+  <div id="app-shell" class="hidden flex-1 flex min-h-screen">
+    <aside class="w-64 bg-bgSidebar border-r border-borderCard flex flex-col justify-between shrink-0">
+      <div>
+        <div class="p-5 flex items-center gap-3 border-b border-borderCard/60">
+          <div class="w-10 h-10 rounded-xl bg-brandBlue/20 border border-brandBlue/40 flex items-center justify-center text-brandBlue">
+            <i class="fa-solid fa-shield-halved text-lg"></i>
+          </div>
+          <div>
+            <div class="font-bold text-white leading-tight">TOTTEM</div>
+            <div class="text-xs text-slate-400">CRM Comercial</div>
+          </div>
+        </div>
+
+        <nav class="p-3 space-y-1.5 mt-2">
+          <button onclick="switchTab('dashboard')" data-tab="dashboard"
+            class="nav-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition bg-brandBlue text-white">
+            <span class="flex items-center gap-3"><i class="fa-solid fa-table-columns w-4"></i> Dashboard</span>
+          </button>
+
+          <button onclick="switchTab('leads')" data-tab="leads"
+            class="nav-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-300 hover:bg-bgInput transition">
+            <span class="flex items-center gap-3"><i class="fa-solid fa-users-rectangle w-4"></i> Base de Leads</span>
+            <span id="badge-leads" class="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full">0</span>
+          </button>
+
+          <button onclick="switchTab('disparador')" data-tab="disparador"
+            class="nav-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-300 hover:bg-bgInput transition">
+            <span class="flex items-center gap-3"><i class="fa-brands fa-whatsapp w-4 text-emerald-400"></i> Disparador WA-AKG</span>
+            <span id="badge-wa-live" class="hidden text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded-full animate-pulse">ATIVO</span>
+          </button>
+
+          <button onclick="switchTab('clientes')" data-tab="clientes"
+            class="nav-btn w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium text-slate-300 hover:bg-bgInput transition">
+            <span class="flex items-center gap-3"><i class="fa-solid fa-building-user w-4"></i> Clientes & Funil</span>
+            <span id="badge-clientes" class="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full">0</span>
+          </button>
+        </nav>
+      </div>
+
+      <div class="p-4 border-t border-borderCard/60 space-y-3">
+        <div class="text-xs text-slate-400 truncate" id="user-logged-name">Admin</div>
+        <button onclick="logout()" class="w-full flex items-center gap-2 text-xs text-rose-400 hover:text-rose-300 py-1.5">
+          <i class="fa-solid fa-right-from-bracket"></i> Sair do CRM
+        </button>
+      </div>
+    </aside>
+
+    <main class="flex-1 flex flex-col min-w-0 relative">
+      <header class="h-16 border-b border-borderCard px-6 flex items-center justify-between bg-bgMain/80 backdrop-blur sticky top-0 z-20">
+        <h2 id="page-title" class="text-lg font-bold text-white">Dashboard Geral</h2>
+        <div class="flex items-center gap-3">
+          <span id="db-sync-badge" class="inline-flex items-center gap-2 text-xs bg-emerald-950/60 border border-emerald-700/40 text-emerald-400 px-3 py-1.5 rounded-full">
+            <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> Conectado ao Supabase
+          </span>
+          <button onclick="refreshAll()" title="Atualizar dados"
+            class="w-9 h-9 rounded-lg bg-bgCard border border-borderCard hover:border-brandBlue flex items-center justify-center text-slate-300 transition">
+            <i class="fa-solid fa-rotate"></i>
+          </button>
+        </div>
+      </header>
+
+      <!-- WIDGET FLUTUANTE DE ENRIQUECIMENTO EM BACKGROUND -->
+      <div id="bg-enrichment-bar" class="hidden mx-6 mt-4 bg-bgCard border border-brandBlue/50 rounded-xl p-3.5 shadow-lg flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-3 flex-1 min-w-[260px]">
+          <div class="w-8 h-8 rounded-lg bg-brandBlue/20 text-brandBlue flex items-center justify-center shrink-0">
+            <i id="bg-enrich-icon" class="fa-solid fa-server fa-beat-fade"></i>
+          </div>
+          <div class="flex-1">
+            <div class="flex items-center justify-between text-xs mb-1">
+              <span class="font-bold text-white" id="bg-enrich-title">Enriquecendo Razão Social em Background...</span>
+              <span class="text-sky-400 font-mono" id="bg-enrich-counter">0 / 0</span>
+            </div>
+            <div class="w-full bg-bgInput rounded-full h-1.5 overflow-hidden">
+              <div id="bg-enrich-progress" class="bg-brandBlue h-1.5 transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div class="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
+              <span id="bg-enrich-api-badge">API ativa: BrasilAPI</span>
+              <span id="bg-enrich-stats">Sucesso: 0 • Falhas: 0</span>
+            </div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="btn-bg-pause" onclick="toggleBackgroundEnrichmentPause()"
+            class="px-3 py-1.5 rounded-lg bg-bgInput hover:bg-slate-700 text-xs text-amber-300 font-semibold">
+            <i class="fa-solid fa-pause mr-1"></i> Pausar
+          </button>
+          <button onclick="stopBackgroundEnrichment()"
+            class="px-3 py-1.5 rounded-lg bg-rose-950/80 hover:bg-rose-900 border border-rose-700/40 text-xs text-rose-300 font-semibold">
+            <i class="fa-solid fa-stop mr-1"></i> Parar
+          </button>
+        </div>
+      </div>
+
+      <div class="p-6 space-y-6 flex-1 overflow-y-auto">
+        <!-- ==================== ABA 1: DASHBOARD ==================== -->
+        <section id="tab-dashboard" class="tab-content space-y-6">
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+            <div class="bg-bgCard border border-borderCard rounded-xl p-4">
+              <div class="flex justify-between items-center text-xs text-slate-400 font-semibold">
+                <span>LEADS TOTAL</span> <i class="fa-solid fa-users text-blue-400"></i>
+              </div>
+              <div id="kpi-leads-total" class="text-2xl font-bold text-white mt-2">0</div>
+              <div id="kpi-leads-pendentes" class="text-xs text-slate-400 mt-1">0 não enviados</div>
+            </div>
+
+            <div class="bg-bgCard border border-borderCard rounded-xl p-4">
+              <div class="flex justify-between items-center text-xs text-slate-400 font-semibold">
+                <span>DISPARADOS</span> <i class="fa-solid fa-check-double text-sky-400"></i>
+              </div>
+              <div id="kpi-leads-enviados" class="text-2xl font-bold text-sky-400 mt-2">0</div>
+              <div id="kpi-leads-erros" class="text-xs text-rose-400 mt-1">0 com erro</div>
+            </div>
+
+            <div class="bg-bgCard border border-amber-500/30 rounded-xl p-4">
+              <div class="flex justify-between items-center text-xs text-slate-400 font-semibold">
+                <span>EM TESTE</span> <i class="fa-regular fa-clock text-amber-400"></i>
+              </div>
+              <div id="kpi-testando" class="text-2xl font-bold text-amber-400 mt-2">0</div>
+              <div class="text-xs text-slate-400 mt-1">Dentro dos 7 dias</div>
+            </div>
+
+            <div class="bg-bgCard border border-rose-500/40 rounded-xl p-4">
+              <div class="flex justify-between items-center text-xs text-rose-400 font-semibold">
+                <span>VENCIDOS (+7D)</span> <i class="fa-solid fa-triangle-exclamation text-rose-400"></i>
+              </div>
+              <div id="kpi-vencidos" class="text-2xl font-bold text-rose-400 mt-2">0</div>
+              <div class="text-xs text-slate-400 mt-1">Aguardando retorno</div>
+            </div>
+
+            <div class="bg-bgCard border border-emerald-500/40 rounded-xl p-4">
+              <div class="flex justify-between items-center text-xs text-emerald-400 font-semibold">
+                <span>COMPRARAM</span> <i class="fa-regular fa-circle-check text-emerald-400"></i>
+              </div>
+              <div id="kpi-comprou" class="text-2xl font-bold text-emerald-400 mt-2">0</div>
+              <div id="kpi-taxa-conversao" class="text-xs text-emerald-300/80 mt-1">0% conversão</div>
+            </div>
+
+            <div class="bg-bgCard border border-borderCard rounded-xl p-4">
+              <div class="flex justify-between items-center text-xs text-slate-400 font-semibold">
+                <span>NÃO COMPROU</span> <i class="fa-regular fa-circle-xmark text-slate-400"></i>
+              </div>
+              <div id="kpi-nao-comprou" class="text-2xl font-bold text-slate-300 mt-2">0</div>
+              <div class="text-xs text-slate-400 mt-1">Perdidos pós-teste</div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="bg-bgCard border border-borderCard rounded-xl p-5">
+              <h3 class="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                <i class="fa-solid fa-circle-exclamation text-rose-400"></i> Clientes com Teste Vencido ou Vencendo
+              </h3>
+              <div id="dash-vencidos-list" class="space-y-2.5 text-sm text-slate-400">
+                Nenhum cliente com teste vencido.
+              </div>
+            </div>
+
+            <div class="bg-bgCard border border-borderCard rounded-xl p-5">
+              <h3 class="text-sm font-bold text-white mb-4 flex items-center gap-2">
+                <i class="fa-solid fa-tag text-brandBlue"></i> Performance por Cupom / Vendedor
+              </h3>
+              <div id="dash-cupons-list" class="space-y-2.5 text-sm text-slate-400">
+                Sem dados de cupons ainda.
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== ABA 2: BASE DE LEADS ==================== -->
+        <section id="tab-leads" class="tab-content hidden space-y-5">
+          <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-2.5">
+              <button onclick="openImportModal('novo')"
+                class="bg-brandBlue hover:bg-brandBlueHover text-white text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-file-import"></i> Importar Planilha (Novos Leads)
+              </button>
+
+              <button onclick="openExportModal()"
+                class="bg-bgInput hover:bg-slate-800 border border-borderCard text-slate-200 text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-file-export text-sky-400"></i> Exportar Planilha
+              </button>
+
+              <button onclick="openImportModal('retorno')"
+                class="bg-bgInput hover:bg-slate-800 border border-borderCard text-slate-200 text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-arrows-rotate text-emerald-400"></i> Sincronizar Retorno
+              </button>
+
+              <button onclick="openBulkEnrichModal()"
+                class="bg-bgInput hover:bg-slate-800 border border-amber-500/40 text-amber-300 text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> Alimentar Razão Social
+              </button>
+            </div>
+
+            <button onclick="openLeadModal()"
+              class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2.5 rounded-lg flex items-center gap-2 transition">
+              <i class="fa-solid fa-plus"></i> Novo Lead Manual
+            </button>
+          </div>
+
+          <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-3 flex-1">
+              <div class="relative flex-1 min-w-[220px] max-w-sm">
+                <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-xs"></i>
+                <input type="text" id="lead-search" oninput="onLeadFilterChange()" placeholder="Buscar por empresa, contato, tel, CNPJ ou TAG..."
+                  class="w-full bg-bgInput border border-borderCard rounded-lg pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-brandBlue" />
+              </div>
+
+              <select id="lead-filter-status" onchange="onLeadFilterChange()"
+                class="bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brandBlue">
+                <option value="todos">Todos os Status</option>
+                <option value="nao_enviado">Não Enviado</option>
+                <option value="enviado">Enviado</option>
+                <option value="erro">Erro no Envio</option>
+                <option value="convertido">Já Convertidos p/ Teste</option>
+                <option value="sem_razao">Sem Razão Social (com CNPJ)</option>
+              </select>
+
+              <select id="lead-filter-tag" onchange="onLeadFilterChange()"
+                class="bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brandBlue">
+                <option value="todas">Todas as TAGs (Listas)</option>
+              </select>
+            </div>
+
+            <div class="flex items-center gap-3">
+              <div class="flex items-center gap-1.5 text-xs text-slate-400">
+                <span>Exibir:</span>
+                <select id="leads-page-size" onchange="changeLeadsPageSize(this.value)"
+                  class="bg-bgInput border border-borderCard rounded-lg px-2.5 py-1.5 text-xs text-white font-semibold focus:outline-none focus:border-brandBlue">
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                </select>
+              </div>
+              <div class="text-xs text-slate-400" id="leads-count-label">Mostrando 0 de 0</div>
+            </div>
+          </div>
+
+          <div class="bg-bgCard border border-borderCard rounded-xl overflow-hidden flex flex-col">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-borderCard text-[11px] font-semibold text-slate-400 uppercase tracking-wider bg-bgSidebar/50">
+                    <th class="py-3.5 px-4">Empresa / Contato</th>
+                    <th class="py-3.5 px-4">CNPJ</th>
+                    <th class="py-3.5 px-4">Telefone / E-mail</th>
+                    <th class="py-3.5 px-4">TAG Lista / Cupom</th>
+                    <th class="py-3.5 px-4">Status Disparo</th>
+                    <th class="py-3.5 px-4 text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="leads-table-body" class="divide-y divide-borderCard/60 text-sm"></tbody>
+              </table>
+            </div>
+
+            <div class="px-4 py-3 border-t border-borderCard bg-bgSidebar/40 flex flex-wrap items-center justify-between gap-3">
+              <div class="text-xs text-slate-400" id="leads-pagination-info">Página 1 de 1</div>
+              <div class="flex items-center gap-1.5" id="leads-pagination-controls"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================== ABA 3: DISPARADOR WA-AKG (ESTILO CHATWOOT) ==================== -->
+        <section id="tab-disparador" class="tab-content hidden space-y-5">
+          <!-- BARRA SUPERIOR DE CONEXÃO WA-AKG & WEBHOOK -->
+          <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+            <div class="flex items-center gap-3">
+              <div class="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                <i class="fa-brands fa-whatsapp text-xl"></i>
+              </div>
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="text-sm font-bold text-white">Central de Disparos WA-AKG</span>
+                  <span id="wa-conn-badge" class="text-[11px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                    Cloudflare Worker Ativo
+                  </span>
+                </div>
+                <p class="text-xs text-slate-400">
+                  Integrado com <a href="https://wa.tottemtecnologia.com.br/dashboard/chat" target="_blank" class="text-sky-400 hover:underline">wa.tottemtecnologia.com.br/dashboard/chat</a>
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2.5">
+              <button onclick="openWaConfigModal()"
+                class="bg-bgInput hover:bg-slate-800 border border-borderCard text-slate-200 text-xs font-semibold px-3.5 py-2 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-sliders text-sky-400"></i> Configurar Endpoints & Webhook
+              </button>
+              <button onclick="testWaConnection()" id="btn-test-wa-conn"
+                class="bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold px-3.5 py-2 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-plug-circle-check"></i> Testar Conexão
+              </button>
+            </div>
+          </div>
+
+          <!-- KPIs DA CAMPANHA ATUAL -->
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div class="bg-bgCard border border-borderCard rounded-xl p-3.5">
+              <div class="text-[11px] text-slate-400 font-semibold">FILA SELECIONADA</div>
+              <div id="wa-kpi-total" class="text-xl font-bold text-white mt-1">0</div>
+            </div>
+            <div class="bg-bgCard border border-amber-500/30 rounded-xl p-3.5">
+              <div class="text-[11px] text-amber-400 font-semibold">PENDENTES</div>
+              <div id="wa-kpi-pendentes" class="text-xl font-bold text-amber-300 mt-1">0</div>
+            </div>
+            <div class="bg-bgCard border border-emerald-500/40 rounded-xl p-3.5">
+              <div class="text-[11px] text-emerald-400 font-semibold">ENVIADOS</div>
+              <div id="wa-kpi-enviados" class="text-xl font-bold text-emerald-400 mt-1">0</div>
+            </div>
+            <div class="bg-bgCard border border-purple-500/40 rounded-xl p-3.5">
+              <div class="text-[11px] text-purple-300 font-semibold">IGNORADOS (15 DIAS)</div>
+              <div id="wa-kpi-ignorados" class="text-xl font-bold text-purple-300 mt-1">0</div>
+            </div>
+            <div class="bg-bgCard border border-rose-500/40 rounded-xl p-3.5">
+              <div class="text-[11px] text-rose-400 font-semibold">COM ERRO</div>
+              <div id="wa-kpi-erros" class="text-xl font-bold text-rose-400 mt-1">0</div>
+            </div>
+          </div>
+
+          <!-- LAYOUT 3 COLUNAS ESTILO CHATWOOT -->
+          <div class="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start">
+            
+            <!-- COLUNA 1 (4 cols): PÚBLICO, LOTES E ANTI-BANIMENTO -->
+            <div class="xl:col-span-4 space-y-5">
+              <!-- SELEÇÃO DE PÚBLICO E LOTES -->
+              <div class="bg-bgCard border border-borderCard rounded-xl p-4 space-y-3.5">
+                <div class="flex items-center justify-between border-b border-borderCard pb-2.5">
+                  <h3 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <i class="fa-solid fa-filter text-brandBlue"></i> 1. Público & Tamanho do Lote
+                  </h3>
+                  <button onclick="buildWaQueue()" class="text-[11px] text-sky-400 hover:underline font-semibold">
+                    Recarregar Fila
+                  </button>
+                </div>
+
+                <div>
+                  <label class="block text-xs text-slate-400 mb-1">Filtrar por TAG da Lista</label>
+                  <select id="wa-filter-tag" onchange="buildWaQueue()"
+                    class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white">
+                    <option value="todas">Todas as TAGs</option>
+                  </select>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Status no CRM</label>
+                    <select id="wa-filter-status" onchange="buildWaQueue()"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-2.5 py-2 text-xs text-white">
+                      <option value="nao_enviado" selected>Não Enviado</option>
+                      <option value="erro">Com Erro (Reenvio)</option>
+                      <option value="nao_enviado_e_erro">Não Enviado + Erro</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Qtd. Leads no Lote</label>
+                    <input type="number" id="wa-batch-limit" value="50" min="1" max="2000" onchange="buildWaQueue()"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-bold" />
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Cupom (opcional)</label>
+                    <input type="text" id="wa-filter-cupom" oninput="buildWaQueue()" placeholder="Todos"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Padrão 9º Dígito</label>
+                    <select id="wa-ninth-digit" onchange="buildWaQueue()"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-2.5 py-2 text-xs text-white">
+                      <option value="keep">Manter original</option>
+                      <option value="add9">Forçar COM 9</option>
+                      <option value="remove9">Forçar SEM 9</option>
+                    </select>
+                  </div>
+                </div>
+
+                <label class="flex items-start gap-2.5 bg-bgInput/80 border border-purple-500/30 rounded-lg p-2.5 cursor-pointer">
+                  <input type="checkbox" id="wa-check-15d" checked class="mt-0.5 accent-brandBlue" />
+                  <div>
+                    <div class="text-xs font-semibold text-purple-200">Proteção Janela de 15 Dias</div>
+                    <div class="text-[11px] text-slate-400">Verifica na conversa e no CRM se o contato recebeu mensagem nos últimos 15 dias e pula automaticamente.</div>
+                  </div>
+                </label>
+              </div>
+
+              <!-- CONFIGURAÇÕES ANTI-BANIMENTO -->
+              <div class="bg-bgCard border border-borderCard rounded-xl p-4 space-y-3.5">
+                <div class="border-b border-borderCard pb-2.5">
+                  <h3 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <i class="fa-solid fa-shield-cat text-amber-400"></i> 2. Proteção Anti-Banimento
+                  </h3>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Delay Mínimo (seg)</label>
+                    <input type="number" id="wa-delay-min" value="18" min="3" max="600"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Delay Máximo (seg)</label>
+                    <input type="number" id="wa-delay-max" value="42" min="5" max="900"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+                  </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Pausar a cada (msgs)</label>
+                    <input type="number" id="wa-pause-every" value="15" min="0" max="500"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+                  </div>
+                  <div>
+                    <label class="block text-xs text-slate-400 mb-1">Tempo Pausa (min)</label>
+                    <input type="number" id="wa-pause-minutes" value="5" min="1" max="120"
+                      class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+                  </div>
+                </div>
+
+                <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                  <input type="checkbox" id="wa-simulate-typing" checked class="accent-brandBlue" />
+                  <span>Simular "digitando..." antes de enviar</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- COLUNA 2 (4 cols): EDITOR DE MENSAGENS SALVAS + PREVIEW WHATSAPP -->
+            <div class="xl:col-span-4 space-y-5">
+              <div class="bg-bgCard border border-borderCard rounded-xl p-4 space-y-3.5">
+                <div class="flex items-center justify-between border-b border-borderCard pb-2.5">
+                  <h3 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <i class="fa-solid fa-message text-emerald-400"></i> 3. Mensagem & Modelos Salvos
+                  </h3>
+                  <button onclick="newWaTemplate()" class="text-[11px] bg-brandBlue/20 hover:bg-brandBlue/30 text-sky-300 px-2.5 py-1 rounded font-semibold">
+                    + Novo Modelo
+                  </button>
+                </div>
+
+                <!-- SELETOR DE TEMPLATE SALVO -->
+                <div class="flex gap-2">
+                  <select id="wa-template-select" onchange="selectWaTemplate(this.value)"
+                    class="flex-1 bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white">
+                    <option value="">-- Selecione um modelo salvo --</option>
+                  </select>
+                  <button onclick="deleteWaTemplate()" title="Excluir modelo selecionado"
+                    class="px-3 py-2 rounded-lg bg-bgInput hover:bg-rose-950 border border-borderCard text-rose-400 text-xs">
+                    <i class="fa-solid fa-trash"></i>
+                  </button>
+                </div>
+
+                <div>
+                  <label class="block text-xs text-slate-400 mb-1">Título do Modelo</label>
+                  <input type="text" id="wa-template-title" placeholder="Ex: Abordagem Licitações Q4"
+                    class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+                </div>
+
+                <!-- BOTÕES DE VARIÁVEIS -->
+                <div>
+                  <div class="flex items-center justify-between mb-1.5">
+                    <span class="text-[11px] text-slate-400">Inserir Variável Dinâmica:</span>
+                  </div>
+                  <div class="flex flex-wrap gap-1.5">
+                    <button type="button" onclick="insertWaVariable('{{NOME}}')"
+                      class="px-2.5 py-1 rounded bg-sky-950 hover:bg-sky-900 border border-sky-700/50 text-sky-300 text-[11px] font-mono font-semibold">
+                      + {{NOME}}
+                    </button>
+                    <button type="button" onclick="insertWaVariable('{{RAZAO_SOCIAL}}')"
+                      class="px-2.5 py-1 rounded bg-purple-950 hover:bg-purple-900 border border-purple-700/50 text-purple-300 text-[11px] font-mono font-semibold">
+                      + {{RAZAO_SOCIAL}}
+                    </button>
+                    <button type="button" onclick="insertWaVariable('{{CNPJ}}')"
+                      class="px-2.5 py-1 rounded bg-amber-950 hover:bg-amber-900 border border-amber-700/50 text-amber-300 text-[11px] font-mono font-semibold">
+                      + {{CNPJ}}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <textarea id="wa-template-content" rows="5" oninput="updateWaLivePreview()"
+                    placeholder="Digite sua mensagem aqui... Use *negrito* e variáveis como {{NOME}}, {{RAZAO_SOCIAL}} e {{CNPJ}}."
+                    class="w-full bg-bgInput border border-borderCard rounded-lg p-3 text-xs text-white leading-relaxed focus:outline-none focus:border-brandBlue"></textarea>
+                </div>
+
+                <div class="flex justify-end gap-2">
+                  <button type="button" onclick="saveWaTemplate()"
+                    class="w-full bg-brandBlue hover:bg-brandBlueHover text-white text-xs font-semibold py-2 rounded-lg flex items-center justify-center gap-2 transition">
+                    <i class="fa-solid fa-floppy-disk"></i> Salvar / Atualizar Modelo
+                  </button>
+                </div>
+              </div>
+
+              <!-- PRÉ-VISUALIZAÇÃO ESTILO BALÃO WHATSAPP / CHATWOOT -->
+              <div class="bg-bgCard border border-borderCard rounded-xl overflow-hidden">
+                <div class="px-4 py-2.5 bg-[#1f2c34] border-b border-borderCard flex items-center justify-between">
+                  <div class="flex items-center gap-2.5">
+                    <div class="w-7 h-7 rounded-full bg-emerald-600 flex items-center justify-center text-white text-xs font-bold">
+                      <i class="fa-solid fa-building"></i>
+                    </div>
+                    <div>
+                      <div id="wa-preview-recipient" class="text-xs font-bold text-white">Prévia do Próximo Lead</div>
+                      <div id="wa-preview-phone" class="text-[10px] text-emerald-400">online</div>
+                    </div>
+                  </div>
+                  <span class="text-[10px] text-slate-400 uppercase font-semibold">Preview Real</span>
+                </div>
+                <div class="wa-chat-bg p-4 min-h-[140px] flex flex-col justify-end">
+                  <div class="ml-auto max-w-[90%] bg-[#005c4b] text-[#e9edef] rounded-xl rounded-tr-none px-3.5 py-2.5 shadow-md">
+                    <p id="wa-preview-bubble" class="text-xs whitespace-pre-line leading-relaxed">
+                      Selecione ou digite uma mensagem acima para visualizar como o cliente receberá no WhatsApp.
+                    </p>
+                    <div class="text-[10px] text-emerald-200/70 text-right mt-1 flex items-center justify-end gap-1">
+                      <span id="wa-preview-time">15:00</span>
+                      <i class="fa-solid fa-check-double text-sky-400"></i>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- COLUNA 3 (4 cols): CONTROLE DE EXECUÇÃO & FILA AO VIVO -->
+            <div class="xl:col-span-4 bg-bgCard border border-borderCard rounded-xl flex flex-col overflow-hidden">
+              <div class="p-4 border-b border-borderCard space-y-3 bg-bgSidebar/60">
+                <div class="flex items-center justify-between">
+                  <h3 class="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <i class="fa-solid fa-paper-plane text-emerald-400"></i> 4. Fila & Execução ao Vivo
+                  </h3>
+                  <span id="wa-runner-status-label" class="text-[11px] font-semibold text-slate-400">Aguardando início</span>
+                </div>
+
+                <!-- BARRA DE PROGRESSO E CONTAGEM REGRESSIVA -->
+                <div class="space-y-1.5">
+                  <div class="w-full bg-bgInput rounded-full h-2 overflow-hidden">
+                    <div id="wa-runner-progress" class="bg-emerald-500 h-2 transition-all duration-300" style="width: 0%"></div>
+                  </div>
+                  <div class="flex justify-between text-[11px] text-slate-400 font-mono">
+                    <span id="wa-runner-counter">0 / 0 processados</span>
+                    <span id="wa-runner-countdown" class="text-amber-300"></span>
+                  </div>
+                </div>
+
+                <!-- BOTÕES DE CONTROLE: INICIAR / PAUSAR / ENCERRAR -->
+                <div class="grid grid-cols-3 gap-2 pt-1">
+                  <button id="btn-wa-start" onclick="startWaCampaign()"
+                    class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold py-2.5 rounded-lg flex items-center justify-center gap-1.5 transition">
+                    <i class="fa-solid fa-play"></i> Iniciar
+                  </button>
+
+                  <button id="btn-wa-pause" onclick="togglePauseWaCampaign()" disabled
+                    class="bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-xs font-bold py-2.5 rounded-lg flex items-center justify-center gap-1.5 transition">
+                    <i class="fa-solid fa-pause"></i> Pausar
+                  </button>
+
+                  <button id="btn-wa-stop" onclick="stopWaCampaign()" disabled
+                    class="bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white text-xs font-bold py-2.5 rounded-lg flex items-center justify-center gap-1.5 transition">
+                    <i class="fa-solid fa-stop"></i> Encerrar
+                  </button>
+                </div>
+              </div>
+
+              <!-- LISTA DE CONVERSAS / FILA ESTILO CHATWOOT -->
+              <div id="wa-queue-list" class="divide-y divide-borderCard/60 max-h-[580px] overflow-y-auto">
+                <div class="p-8 text-center text-xs text-slate-500">
+                  Configure os filtros ao lado para carregar a fila de disparos.
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- ==================== ABA 4: CLIENTES (TABELA PESSOAS) ==================== -->
+        <section id="tab-clientes" class="tab-content hidden space-y-5">
+          <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-wrap items-center justify-between gap-3">
+            <div class="flex flex-wrap items-center gap-3 flex-1">
+              <div class="relative flex-1 min-w-[240px] max-w-md">
+                <i class="fa-solid fa-magnifying-glass absolute left-3.5 top-3 text-slate-400 text-xs"></i>
+                <input type="text" id="cliente-search" oninput="renderClientes()" placeholder="Razão Social, CNPJ, cidade ou motivo..."
+                  class="w-full bg-bgInput border border-borderCard rounded-lg pl-9 pr-3 py-2 text-xs text-white focus:outline-none focus:border-brandBlue" />
+              </div>
+
+              <select id="cliente-filter-status" onchange="renderClientes()"
+                class="bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-brandBlue">
+                <option value="todos">Todos os Status</option>
+                <option value="testando">Em Teste</option>
+                <option value="comprou">Comprou</option>
+                <option value="nao_comprou">Não Comprou</option>
+              </select>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <div class="bg-bgInput border border-borderCard rounded-lg p-1 flex text-xs">
+                <button onclick="setClientesView('lista')" id="btn-view-lista" class="px-3 py-1 rounded-md bg-brandBlue text-white font-medium">
+                  <i class="fa-solid fa-list mr-1"></i> Lista
+                </button>
+                <button onclick="setClientesView('kanban')" id="btn-view-kanban" class="px-3 py-1 rounded-md text-slate-400 hover:text-white font-medium">
+                  <i class="fa-solid fa-columns mr-1"></i> Kanban
+                </button>
+              </div>
+
+              <button onclick="openClienteModal()"
+                class="bg-brandBlue hover:bg-brandBlueHover text-white text-xs font-semibold px-4 py-2 rounded-lg flex items-center gap-2 transition">
+                <i class="fa-solid fa-plus"></i> Novo Cliente
+              </button>
+            </div>
+          </div>
+
+          <div id="clientes-view-lista" class="bg-bgCard border border-borderCard rounded-xl overflow-hidden">
+            <div class="overflow-x-auto">
+              <table class="w-full text-left border-collapse">
+                <thead>
+                  <tr class="border-b border-borderCard text-[11px] font-semibold text-slate-400 uppercase tracking-wider bg-bgSidebar/50">
+                    <th class="py-3.5 px-4">Razão Social / Fantasia</th>
+                    <th class="py-3.5 px-4">CNPJ / Contato</th>
+                    <th class="py-3.5 px-4">Cupom</th>
+                    <th class="py-3.5 px-4">Data Cadastro</th>
+                    <th class="py-3.5 px-4">Status / Motivo</th>
+                    <th class="py-3.5 px-4 text-right">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="clientes-table-body" class="divide-y divide-borderCard/60 text-sm"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="clientes-view-kanban" class="hidden grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-col gap-3">
+              <div class="flex items-center justify-between pb-2 border-b border-borderCard">
+                <span class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
+                  <i class="fa-regular fa-clock"></i> Em Teste
+                </span>
+                <span id="kanban-count-testando" class="text-xs bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full font-bold">0</span>
+              </div>
+              <div id="kanban-col-testando" class="space-y-3 min-h-[300px]"></div>
+            </div>
+
+            <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-col gap-3">
+              <div class="flex items-center justify-between pb-2 border-b border-borderCard">
+                <span class="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
+                  <i class="fa-regular fa-circle-check"></i> Comprou
+                </span>
+                <span id="kanban-count-comprou" class="text-xs bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">0</span>
+              </div>
+              <div id="kanban-col-comprou" class="space-y-3 min-h-[300px]"></div>
+            </div>
+
+            <div class="bg-bgCard border border-borderCard rounded-xl p-4 flex flex-col gap-3">
+              <div class="flex items-center justify-between pb-2 border-b border-borderCard">
+                <span class="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-2">
+                  <i class="fa-regular fa-circle-xmark"></i> Não Comprou
+                </span>
+                <span id="kanban-count-nao_comprou" class="text-xs bg-rose-500/20 text-rose-300 px-2 py-0.5 rounded-full font-bold">0</span>
+              </div>
+              <div id="kanban-col-nao_comprou" class="space-y-3 min-h-[300px]"></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- ==================== MODAL CONFIGURAÇÃO ENDPOINTS WA-AKG ==================== -->
+  <div id="modal-wa-config" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-lg shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-sliders text-sky-400"></i> Integração WA-AKG & Webhook Cloudflare
+          </h3>
+          <p class="text-xs text-slate-400">Configure as rotas da sua API em <code class="text-sky-400">wa.tottemtecnologia.com.br</code>.</p>
+        </div>
+        <button onclick="closeModal('modal-wa-config')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <form onsubmit="saveWaConfig(event)" class="p-5 space-y-4">
+        <div>
+          <label class="block text-xs text-slate-400 mb-1">URL Base do Servidor WA-AKG *</label>
+          <input type="url" id="cfg-wa-base-url" required placeholder="https://wa.tottemtecnologia.com.br"
+            class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Endpoint de Envio (POST)</label>
+            <input type="text" id="cfg-wa-send-endpoint" required placeholder="/api/send-message"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Endpoint Histórico 15d (GET)</label>
+            <input type="text" id="cfg-wa-history-endpoint" placeholder="/api/messages/{phone}"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Instância / Sessão (opcional)</label>
+            <input type="text" id="cfg-wa-instance" placeholder="default"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Token / API Key (opcional)</label>
+            <input type="password" id="cfg-wa-apikey" placeholder="Bearer / apikey"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-mono" />
+          </div>
+        </div>
+
+        <div class="bg-bgSidebar border border-borderCard rounded-xl p-3 space-y-1">
+          <div class="text-[11px] font-semibold text-emerald-400">URL do Webhook Cloudflare (para colar no WA-AKG):</div>
+          <code id="cfg-wa-webhook-url" class="block text-[11px] text-slate-300 break-all select-all"></code>
+        </div>
+
+        <div class="pt-2 flex justify-end gap-3">
+          <button type="button" onclick="closeModal('modal-wa-config')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+          <button type="submit" class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover text-white">Salvar Configuração</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL EXPORTAÇÃO PROFISSIONAL ==================== -->
+  <div id="modal-export" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-lg shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-file-export text-sky-400"></i> Exportar Leads para Planilha
+          </h3>
+          <p class="text-xs text-slate-400">Configure os filtros de status, TAG e o padrão do 9º dígito.</p>
+        </div>
+        <button onclick="closeModal('modal-export')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <div class="p-5 space-y-5">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-2">1. Selecione quais Status exportar:</label>
+          <div class="grid grid-cols-3 gap-2.5">
+            <label class="flex items-center gap-2 bg-bgInput border border-borderCard rounded-lg p-2.5 cursor-pointer hover:border-brandBlue">
+              <input type="checkbox" class="exp-status-cb accent-brandBlue" value="nao_enviado" checked onchange="updateExportPreviewCount()" />
+              <span class="text-xs text-white">Não Enviado</span>
+            </label>
+            <label class="flex items-center gap-2 bg-bgInput border border-borderCard rounded-lg p-2.5 cursor-pointer hover:border-brandBlue">
+              <input type="checkbox" class="exp-status-cb accent-brandBlue" value="erro" onchange="updateExportPreviewCount()" />
+              <span class="text-xs text-rose-300">Com Erro</span>
+            </label>
+            <label class="flex items-center gap-2 bg-bgInput border border-borderCard rounded-lg p-2.5 cursor-pointer hover:border-brandBlue">
+              <input type="checkbox" class="exp-status-cb accent-brandBlue" value="enviado" onchange="updateExportPreviewCount()" />
+              <span class="text-xs text-sky-300">Enviado</span>
+            </label>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-2">2. Tratamento do 9º Dígito (Celular Brasil):</label>
+          <div class="space-y-2">
+            <label class="flex items-start gap-2.5 bg-bgInput border border-borderCard rounded-lg p-3 cursor-pointer hover:border-brandBlue">
+              <input type="radio" name="exp-ninth-digit" value="keep" checked class="mt-0.5 accent-brandBlue" onchange="updateExportPreviewCount()" />
+              <div>
+                <div class="text-xs font-semibold text-white">Manter original do cadastro</div>
+                <div class="text-[11px] text-slate-400">Exporta exatamente como está salvo no banco (ex: 5562999998888).</div>
+              </div>
+            </label>
+
+            <label class="flex items-start gap-2.5 bg-bgInput border border-borderCard rounded-lg p-3 cursor-pointer hover:border-brandBlue">
+              <input type="radio" name="exp-ninth-digit" value="add9" class="mt-0.5 accent-brandBlue" onchange="updateExportPreviewCount()" />
+              <div>
+                <div class="text-xs font-semibold text-emerald-300">Forçar COM 9º dígito (13 dígitos)</div>
+                <div class="text-[11px] text-slate-400">Adiciona o 9 após o DDD caso esteja sem.</div>
+              </div>
+            </label>
+
+            <label class="flex items-start gap-2.5 bg-bgInput border border-borderCard rounded-lg p-3 cursor-pointer hover:border-brandBlue">
+              <input type="radio" name="exp-ninth-digit" value="remove9" class="mt-0.5 accent-brandBlue" onchange="updateExportPreviewCount()" />
+              <div>
+                <div class="text-xs font-semibold text-amber-300">Forçar SEM 9º dígito (12 dígitos)</div>
+                <div class="text-[11px] text-slate-400">Remove o 9 após o DDD.</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Filtrar por TAG</label>
+            <select id="exp-tag-filter" onchange="updateExportPreviewCount()"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-2.5 py-2 text-xs text-white">
+              <option value="">Todas as TAGs</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Filtrar por Cupom</label>
+            <input type="text" id="exp-cupom-filter" oninput="updateExportPreviewCount()" placeholder="Todos"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Formato</label>
+            <select id="exp-file-format" class="w-full bg-bgInput border border-borderCard rounded-lg px-2.5 py-2 text-xs text-white">
+              <option value="xlsx">Excel (.xlsx)</option>
+              <option value="csv">CSV (.csv)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="bg-bgSidebar border border-borderCard rounded-xl p-3 flex items-center justify-between">
+          <span class="text-xs text-slate-400">Total pronto para exportar:</span>
+          <span id="exp-total-preview" class="text-sm font-bold text-sky-400">0 contatos</span>
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-borderCard flex justify-end gap-3">
+        <button onclick="closeModal('modal-export')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+        <button id="btn-run-export" onclick="executeProfessionalExport()"
+          class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover text-white flex items-center gap-2">
+          <i class="fa-solid fa-download"></i> Baixar Planilha
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL ENRIQUECIMENTO EM MASSA ==================== -->
+  <div id="modal-bulk-enrich" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-md shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-bold text-white flex items-center gap-2">
+            <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> Alimentar Razão Social em Massa
+          </h3>
+          <p class="text-xs text-slate-400">Consulta em background com Load Balance (BrasilAPI + ReceitaWS + MinhaReceita).</p>
+        </div>
+        <button onclick="closeModal('modal-bulk-enrich')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <div class="p-5 space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-300 mb-1.5">Qual grupo de Leads deseja processar?</label>
+          <select id="bulk-enrich-filter" onchange="updateBulkEnrichCount()"
+            class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2.5 text-xs text-white">
+            <option value="sem_razao_todos">Todos os Leads com CNPJ e SEM Razão Social</option>
+            <option value="nao_enviado">Apenas Status: Não Enviado (sem Razão Social)</option>
+            <option value="enviado">Apenas Status: Enviado (sem Razão Social)</option>
+            <option value="erro">Apenas Status: Erro (sem Razão Social)</option>
+            <option value="forcar_todos">Reprocessar TODOS os Leads com CNPJ (sobrescrever)</option>
+          </select>
+        </div>
+
+        <div class="bg-bgSidebar border border-borderCard rounded-xl p-3.5 space-y-1.5 text-xs">
+          <div class="flex justify-between">
+            <span class="text-slate-400">Leads na fila para consulta:</span>
+            <span id="bulk-enrich-queue-count" class="font-bold text-amber-400">0</span>
+          </div>
+          <p class="text-[11px] text-slate-400 leading-relaxed pt-1">
+            <i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i>
+            O sistema intercala automaticamente entre <strong>3 provedores públicos</strong> com cadência controlada para evitar bloqueio (HTTP 429).
+          </p>
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-borderCard flex justify-end gap-3">
+        <button onclick="closeModal('modal-bulk-enrich')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+        <button id="btn-start-bulk-enrich" onclick="startBackgroundEnrichment()"
+          class="px-5 py-2 rounded-lg text-xs font-semibold bg-amber-600 hover:bg-amber-500 text-white flex items-center gap-2">
+          <i class="fa-solid fa-play"></i> Iniciar em Background
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL IMPORTAÇÃO & REVISÃO INTELIGENTE ==================== -->
+  <div id="modal-import" class="fixed inset-0 z-50 bg-black/80 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 id="import-modal-title" class="text-base font-bold text-white">Importar Planilha</h3>
+          <p id="import-modal-subtitle" class="text-xs text-slate-400">Passo 1: Selecione a planilha, defina a TAG da lista e mapeie as colunas • Passo 2: Revise antes de gravar.</p>
+        </div>
+        <button onclick="closeModal('modal-import')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <div id="import-step-1" class="p-5 overflow-y-auto space-y-5 flex-1">
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 items-end bg-bgSidebar/60 border border-borderCard rounded-xl p-4">
+          <div>
+            <label class="block text-xs font-semibold text-slate-300 mb-1.5">1. Arquivo da Planilha (.xlsx / .csv)</label>
+            <input type="file" id="import-file-input" accept=".xlsx,.xls,.csv" onchange="handleFileSelect(event)"
+              class="block w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-3.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-brandBlue file:text-white hover:file:bg-brandBlueHover cursor-pointer" />
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-purple-300 mb-1.5">
+              <i class="fa-solid fa-tag mr-1"></i> 2. TAG de Identificação da Lista *
+            </label>
+            <input type="text" id="import-list-tag" placeholder="Ex: LISTA_COMPRASGOV_NOV"
+              class="w-full bg-bgInput border border-purple-500/50 rounded-lg px-3 py-2 text-xs text-white uppercase font-semibold focus:outline-none focus:border-purple-400" />
+          </div>
+
+          <div id="import-cupom-wrapper">
+            <label class="block text-xs text-slate-400 mb-1.5">3. Cupom Padrão (opcional)</label>
+            <input type="text" id="import-default-cupom" placeholder="Ex: RODRIGUES"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+        </div>
+
+        <div id="import-preview-container" class="hidden space-y-3">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-sky-400" id="import-rows-summary">0 linhas detectadas</span>
+            <span class="text-[11px] text-slate-400">Preview das 5 primeiras linhas — escolha o campo correspondente no topo de cada coluna:</span>
+          </div>
+          <div class="overflow-x-auto border border-borderCard rounded-xl">
+            <table class="w-full text-left text-xs" id="import-preview-table"></table>
+          </div>
+        </div>
+      </div>
+
+      <div id="import-step-2" class="hidden p-5 overflow-y-auto space-y-4 flex-1">
+        <div id="review-summary-cards" class="grid grid-cols-1 md:grid-cols-3 gap-3"></div>
+        <div class="flex items-center justify-between border-b border-borderCard pb-2 flex-wrap gap-2">
+          <div class="flex gap-2" id="review-tabs-bar"></div>
+          <div class="text-[11px] text-slate-400">
+            <i class="fa-solid fa-pen-to-square text-sky-400 mr-1"></i> Edite qualquer campo antes de confirmar.
+          </div>
+        </div>
+        <div class="overflow-x-auto border border-borderCard rounded-xl max-h-[48vh]">
+          <table class="w-full text-left text-xs border-collapse" id="review-table"></table>
+        </div>
+      </div>
+
+      <div class="p-4 border-t border-borderCard flex items-center justify-between gap-3">
+        <div>
+          <button id="btn-back-step-1" onclick="backToImportStep1()" class="hidden px-4 py-2 rounded-lg text-xs text-slate-300 bg-bgInput hover:bg-slate-800">
+            <i class="fa-solid fa-arrow-left mr-1"></i> Voltar ao Mapeamento
+          </button>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="closeModal('modal-import')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+          <button id="btn-analyze-import" onclick="analyzeImportRows()" disabled
+            class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover disabled:opacity-40 text-white">
+            Analisar & Revisar Cruzamento <i class="fa-solid fa-arrow-right ml-1"></i>
+          </button>
+          <button id="btn-confirm-import" onclick="commitReviewedImport()"
+            class="hidden px-5 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white">
+            <i class="fa-solid fa-check mr-1"></i> Confirmar e Gravar no Banco
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL LEAD (CRIAR / EDITAR) ==================== -->
+  <div id="modal-lead" class="fixed inset-0 z-50 bg-black/75 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-xl shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <h3 id="lead-modal-title" class="text-base font-bold text-white">Cadastrar Lead</h3>
+        <button onclick="closeModal('modal-lead')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+      <form id="lead-form" onsubmit="saveLead(event)" class="p-5 space-y-4">
+        <input type="hidden" id="lead-id" />
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">CNPJ (opcional)</label>
+            <div class="flex gap-2">
+              <input type="text" id="lead-cnpj" placeholder="00.000.000/0001-00"
+                class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+              <button type="button" id="btn-modal-lead-cnpj" onclick="consultarRazaoSocialNoModalLead()" title="Buscar Razão Social pelo CNPJ"
+                class="px-3 py-2 bg-brandBlue hover:bg-brandBlueHover text-white rounded-lg text-xs font-semibold shrink-0 flex items-center gap-1">
+                <i class="fa-solid fa-magnifying-glass"></i> Razão
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Telefone WhatsApp *</label>
+            <input type="text" id="lead-telefone" required placeholder="5562999999999"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Razão Social / Empresa</label>
+            <input type="text" id="lead-razao" placeholder="Nome da empresa"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Nome do Contato / Sócio (QSA)</label>
+            <input type="text" id="lead-contato" placeholder="Nome do responsável"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">E-mail</label>
+            <input type="email" id="lead-email" placeholder="contato@empresa.com"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-purple-300 mb-1">TAG da Lista</label>
+            <input type="text" id="lead-tag" placeholder="Ex: LISTA_MANUAL"
+              class="w-full bg-bgInput border border-purple-500/40 rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Cupom / Origem</label>
+            <input type="text" id="lead-cupom" placeholder="RODRIGUES"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Status Disparo</label>
+            <select id="lead-status" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white">
+              <option value="nao_enviado">Não Enviado</option>
+              <option value="enviado">Enviado</option>
+              <option value="erro">Erro</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="lead-erro-box" class="hidden">
+          <label class="block text-xs text-rose-400 mb-1">Motivo do Erro</label>
+          <input type="text" id="lead-motivo-erro" placeholder="Ex: Número sem WhatsApp"
+            class="w-full bg-bgInput border border-rose-500/40 rounded-lg px-3 py-2 text-xs text-white" />
+        </div>
+
+        <div class="pt-2 flex justify-end gap-3">
+          <button type="button" onclick="closeModal('modal-lead')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+          <button type="submit" class="px-5 py-2 rounded-lg text-xs font-semibold bg-brandBlue hover:bg-brandBlueHover text-white">Salvar Lead</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== MODAL CLIENTE / CONVERSÃO PARA PESSOAS ==================== -->
+  <div id="modal-cliente" class="fixed inset-0 z-50 bg-black/75 hidden items-center justify-center p-4">
+    <div class="bg-bgCard border border-borderCard rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 id="cliente-modal-title" class="text-base font-bold text-white">Cadastro Completo do Cliente</h3>
+          <p class="text-xs text-slate-400">Sincronizado diretamente com a tabela <code class="text-sky-400">pessoas</code> do painel Tottem.</p>
+        </div>
+        <button onclick="closeModal('modal-cliente')" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <form id="cliente-form" onsubmit="saveCliente(event)" class="p-5 overflow-y-auto space-y-4 flex-1">
+        <input type="hidden" id="cliente-id" />
+        <input type="hidden" id="cliente-from-lead-id" />
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="md:col-span-2">
+            <label class="block text-xs text-slate-400 mb-1">CNPJ * (Busca automática BrasilAPI + ReceitaWS)</label>
+            <div class="flex gap-2">
+              <input type="text" id="cli-cnpj" required placeholder="00.000.000/0001-00"
+                class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+              <button type="button" id="btn-busca-cnpj-cli" onclick="consultarCNPJParaCliente()"
+                class="px-4 py-2 bg-brandBlue hover:bg-brandBlueHover text-white rounded-lg text-xs font-semibold shrink-0 flex items-center gap-1.5">
+                <i class="fa-solid fa-bolt"></i> Consultar CNPJ
+              </button>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Status Comercial *</label>
+            <select id="cli-status" onchange="toggleMotivoPerdaField()"
+              class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white font-semibold">
+              <option value="testando">Em Teste (7 dias)</option>
+              <option value="comprou">Comprou</option>
+              <option value="nao_comprou">Não Comprou</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Razão Social *</label>
+            <input type="text" id="cli-razao" required class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Nome Fantasia / Sócio (QSA)</label>
+            <input type="text" id="cli-fantasia" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Telefone WhatsApp</label>
+            <input type="text" id="cli-telefone" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">E-mail</label>
+            <input type="email" id="cli-email" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Cupom</label>
+            <input type="text" id="cli-cupom" placeholder="RODRIGUES" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">CEP</label>
+            <input type="text" id="cli-cep" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div class="col-span-2">
+            <label class="block text-xs text-slate-400 mb-1">Logradouro</label>
+            <input type="text" id="cli-logradouro" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Número</label>
+            <input type="text" id="cli-numero" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Bairro</label>
+            <input type="text" id="cli-bairro" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Cidade</label>
+            <input type="text" id="cli-cidade" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white" />
+          </div>
+          <div>
+            <label class="block text-xs text-slate-400 mb-1">Estado (UF)</label>
+            <input type="text" id="cli-estado" maxlength="2" class="w-full bg-bgInput border border-borderCard rounded-lg px-3 py-2 text-xs text-white uppercase" />
+          </div>
+        </div>
+
+        <div id="cli-motivo-perda-box" class="hidden">
+          <label class="block text-xs text-rose-400 mb-1">Motivo da Não Compra</label>
+          <input type="text" id="cli-motivo-perda" placeholder="Ex: Preço, Não respondeu após teste..."
+            class="w-full bg-bgInput border border-rose-500/40 rounded-lg px-3 py-2 text-xs text-white" />
+        </div>
+
+        <div class="pt-3 border-t border-borderCard flex justify-end gap-3">
+          <button type="button" onclick="closeModal('modal-cliente')" class="px-4 py-2 rounded-lg text-xs text-slate-300 hover:bg-bgInput">Cancelar</button>
+          <button type="submit" class="px-5 py-2 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white">
+            Salvar em Clientes (Pessoas)
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================== DRAWER HISTÓRICO DE INTERAÇÕES ==================== -->
+  <div id="drawer-timeline" class="fixed inset-0 z-50 bg-black/60 hidden justify-end">
+    <div class="w-full max-w-md bg-bgCard border-l border-borderCard h-full flex flex-col shadow-2xl">
+      <div class="p-5 border-b border-borderCard flex items-center justify-between">
+        <div>
+          <h3 id="timeline-title" class="text-sm font-bold text-white">Histórico & Notas</h3>
+          <p id="timeline-subtitle" class="text-xs text-slate-400 truncate max-w-xs"></p>
+        </div>
+        <button onclick="closeTimeline()" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark text-lg"></i></button>
+      </div>
+
+      <div id="timeline-list" class="flex-1 overflow-y-auto p-5 space-y-3"></div>
+
+      <form onsubmit="addTimelineNote(event)" class="p-4 border-t border-borderCard bg-bgSidebar space-y-2">
+        <textarea id="timeline-note-input" rows="2" required placeholder="Registrar anotação comercial ou follow-up..."
+          class="w-full bg-bgInput border border-borderCard rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-brandBlue"></textarea>
+        <button type="submit" class="w-full bg-brandBlue hover:bg-brandBlueHover text-white text-xs font-semibold py-2 rounded-lg">
+          Adicionar Nota
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
