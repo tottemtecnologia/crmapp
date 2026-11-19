@@ -4,6 +4,7 @@
 
 const SUPABASE_URL = 'https://nrgllzzdemuuaigcjsht.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_Z1nBzTFVax9QWVbc3_gcwA_u8ZrHSc2';
+const SUPABASE_KEY = SUPABASE_ANON_KEY;
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
