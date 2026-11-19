@@ -45,10 +45,10 @@ let bgEnrichWorker = {
 
 // Configuração e Estado do Disparador WA-AKG (via Cloudflare Worker)
 let waConfig = {
-  baseUrl: 'https://wa.tottemtecnologia.com.br',
+  baseUrl: 'https://wa.tottemtecnologia.com.br/api',
   sendEndpoint: '/messages/{sessionId}/{jid}/send',
   historyEndpoint: '/chat/{sessionId}/{jid}',
-  statusEndpoint: '/sessions/{sessionId}',
+  statusEndpoint: '/sessions',
   instance: '',
   apiKey: ''
 };
